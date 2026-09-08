@@ -1466,7 +1466,7 @@ Two low-risk hardening items from the backlog, bundled since they're independent
 
 ### Known Issues
 - Both items above are implemented but **unverified** — do not mark them done in `AI_HANDOFF.md`'s Pending list until run against real infrastructure.
-- `characters.xuid` rename, NBT patch automation, inventory UI, CI/deploy/backup tooling — still untouched, unchanged from previous entries.
+- `characters.xuid` rename, NBT patch automation, inventory UI, CI/deploy/backup tooling — still untouched, unchanged from previous entries. (Status as of this 09:30 entry — the `characters.xuid` rename was completed later the same day by migration `015`, see the 12:00 entry.)
 
 ### Next Steps
 1. `npm run migrate` — applies `014_role_rank.sql`.
@@ -1548,7 +1548,7 @@ A logout that revoked all of a user's sessions would silently log out every devi
 - Everything else unchanged from previous entries.
 
 ### Next Steps
-This closes the last item from the previous entry's Pending list that was quick to verify. Remaining pending items (role ranks in DB vs hardcoded, `trust proxy` config, `characters.xuid` rename, NBT patch automation, session cleanup job, `JWT_SECRET` storage confirmation, CI/deploy/backup tooling) are lower-urgency and can be picked up as needed.
+This closes the last item from the previous entry's Pending list that was quick to verify. Remaining pending items (role ranks in DB vs hardcoded, `trust proxy` config, `characters.xuid` rename, NBT patch automation, session cleanup job, `JWT_SECRET` storage confirmation, CI/deploy/backup tooling) are lower-urgency and can be picked up as needed. (Status as of this 10:30 entry — `characters.xuid` was renamed to `persistent_id` later that day via migration `015`, and the session cleanup job was subsequently built and verified; see the 11:00/11:15 and 12:00 entries.)
 
 ### Handoff Notes
 Auth/session subsystem (login, JWT+jti verification, revocation on ban, per-session logout) now has no known untested paths.
@@ -1647,7 +1647,7 @@ Verify `JWT_SECRET` was never leaked via git history, then set the project up wi
 
 ### Next Steps
 1. If/when a remote is needed (GitHub, GitLab, etc.), add it with `git remote add origin <url>` and push.
-2. Continue with remaining `AI_HANDOFF.md` Pending items: `trust proxy` verification (needs a real reverse proxy), `characters.xuid` rename, NBT patch automation, inventory UI decision, CI/deploy/backup tooling.
+2. Continue with remaining `AI_HANDOFF.md` Pending items: `trust proxy` verification (needs a real reverse proxy), `characters.xuid` rename, NBT patch automation, inventory UI decision, CI/deploy/backup tooling. (Status as of this 11:30 entry — the `characters.xuid` rename was completed later that day via migration `015`, see the 12:00 entry.)
 
 ### Handoff Notes
 This project now has real version control for the first time — treat `990e50c` as the true starting point of history. Nothing before this commit exists to inspect or blame; don't assume older history is retrievable.

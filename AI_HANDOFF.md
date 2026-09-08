@@ -1,51 +1,82 @@
 # AI Handoff
 
 ## Project State
-- Every subsystem verified end-to-end on real infrastructure, including the session cleanup job (fully tested — confirmed to remove only dead rows, never disturbs live sessions).
 - Version: 0.1.0
-- Status: Core feature set is fully verified. The only unverified items are infrastructure-dependent paths that require setup unavailable in a plain dev environment — most notably `trust proxy` config, which needs a real reverse proxy to test `req.ip` behavior (see In Progress).
+- This handoff describes the project state at commit `eaca767` (see Version Control).
+- NOT a blanket "fully verified" claim: the core feature set is verified against
+  real infrastructure; a small set of infrastructure-dependent paths remains
+  explicitly unverified (listed below under **Unverified**).
 
-## Completed
-- Backend: auth (revocation + rate limiting + jti/user_id cross-check), RBAC (permissions + boundaries + hierarchy all verified), audit log, economy, character whitelist, character linking, inventory, trading (+ expiry), shop (buy/sell + catalog management + single-listing read + stock-limit rollback) — all verified via real requests
-- BDS + Script API + HTTP bridge — verified with real client joins
-- **Session/jti security fix** (found and fixed by the user's own testing pass): `verifySessionToken()` now cross-checks `session.user_id === payload.sub`, closing an impersonation path that existed if `JWT_SECRET` ever leaked
-- **Session cleanup job — fully verified**: manual trigger cleaned up 5 stale session rows accumulated from earlier testing; the calling (still-valid) session continued working immediately after; DB confirmed `sessions` count dropped from 5 to exactly 1 (the remaining valid one).
+## Verified (tested on real infrastructure)
+- Backend: auth (Discord OAuth login, JWT+jti sessions, revocation on ban,
+  per-session logout, rate limiting, jti/user_id cross-check), RBAC (permissions,
+  boundaries, hierarchy, rank — all exercised via real requests), audit log,
+  economy (transfer/grant), character whitelist, character linking (via the
+  in-game `!link` flow end-to-end on a real client), inventory, trading
+  (+ anti-scam rollback, + expiry job), shop (buy/sell + catalog management +
+  single-listing read + stock-limit rollback) — all verified via real requests.
+- BDS + Script API + HTTP bridge — verified with real client joins.
+- Session/jti security fix: `verifySessionToken()` cross-checks
+  `session.user_id === payload.sub`, closing an impersonation path that existed
+  if `JWT_SECRET` ever leaked.
+- Session cleanup job: manual trigger cleaned up 5 stale rows; the calling
+  (still-valid) session kept working; DB confirmed count went 5 → 1.
+- `characters.xuid` → `characters.persistent_id` rename (migration
+  `015_persistent_id_rename.sql`): constraint renamed to
+  `characters_persistent_id_key`, no `xuid` column remains. Character/bridge
+  modules use `persistent_id` internally; external wire fields (`xuid` on
+  `/bridge/character/link`, `playerId` on `/bridge/player/join`) deliberately
+  unchanged for behavior-pack compatibility. Admin routes now require an
+  authenticated `req.userId`. TypeScript build passes.
+- Working tree verified clean; no secrets in git history; `.env` ignored.
 
-- **`characters.xuid` renamed to `characters.persistent_id`** (migration `015_persistent_id_rename.sql`): unique constraint renamed to `characters_persistent_id_key`, no `xuid` column remains. Character and bridge modules updated to use `persistent_id` internally; external wire fields (`xuid` on `/bridge/character/link`, `playerId` on `/bridge/player/join`) deliberately left unchanged for compatibility with the deployed behavior pack. Also fixed: admin routes now require an authenticated `req.userId`. Verified: TypeScript build passes, JWT/session verification and the authenticated `/character/link-code` endpoint both work, DB schema confirmed via `\d characters`. Temporary test sessions/characters/trades/transactions created during verification were cleaned up.
+## Unverified (needs infrastructure we don't have in a plain dev env)
+- `trust proxy` config (implemented, `TRUST_PROXY` env in `config/index.ts` +
+  `index.ts`) — cannot be tested without a real reverse proxy to confirm `req.ip`
+  reflects the client, not the proxy. Do NOT mark this verified until tested that way.
+- Nothing else in the built feature set is currently known-unverified.
 
-## In Progress
-- **Role ranks in DB** — implemented and **verified** against real infra (see `CHANGELOG_AI.md` [2026-09-08 09:35]). **Trust proxy config** (same bundled change, `config/index.ts`, `index.ts`) still **unverified** — needs a real reverse proxy to test `req.ip` behavior.
+## Pending (features/tooling not built yet — not blocked items)
+- Automate the `level.dat` NBT patch for Beta-APIs worlds (currently manual, see README).
+- Decide inventory size/UI approach before player-facing.
+- Integration tests (automated), CI/deploy/backup tooling.
 
-## Pending
-- Consider automating the `level.dat` NBT patch for Beta-APIs worlds
-- Decide inventory size/UI approach before player-facing
-- Integration tests, CI/deploy/backup tooling
+> Note: the `characters.xuid` rename is DONE (migration 015) — do not treat it
+> as pending. Historical CHANGELOG entries that mention it as pending are
+> snapshots of earlier status, not current state.
 
 ## Version Control
-- Git repo initialized 2026-09-08. Latest commit (as of this handoff): `ad09e13` (Pin latest commit hash in handoff version control section).
-- The 015 `persistent_id` rename work is committed as `744f82b` (Complete persistent id rename).
-- `JWT_SECRET` confirmed never leaked — no git history existed before the repo was initialized; `.env` is in `.gitignore`.
-- As of this handoff, there are **no uncommitted changes** (working tree clean).
+- Git repo initialized 2026-09-08.
+- Commit this handoff is based on: `eaca767`. The 015 `persistent_id` rename
+  work is committed as `744f82b` (Complete persistent id rename).
+- Confirm with `git rev-parse --short HEAD` / `git status --short` when
+  starting work — a handoff is a snapshot, so later bookkeeping commits may
+  sit on top of it.
+- `JWT_SECRET` never leaked: no git history predates the repo; `.env` is in
+  `.gitignore` (verified via `git check-ignore`).
 
 ## Architecture Decisions
-(unchanged, plus:) Session cleanup is decoupled from what makes a
-session actually stop working — `verifySessionToken`'s expiry/revocation
-checks are the real security boundary; the cleanup job only ever
-deletes rows that are already unusable, purely for table hygiene.
-Mirrors the trade-expiry job's exact pattern (idempotent periodic
-job, manual-trigger admin route, started once at boot).
+(unchanged, plus:) Session cleanup is decoupled from what makes a session
+actually stop working — `verifySessionToken`'s expiry/revocation checks are the
+real security boundary; the cleanup job only ever deletes rows that are already
+unusable, purely for table hygiene. Mirrors the trade-expiry job's exact pattern
+(idempotent periodic job, manual-trigger admin route, started once at boot).
 
 ## Known Issues
 - Cleanup interval hardcoded (hourly), same style as trade expiry's hardcoded threshold.
-- `JWT_SECRET` storage: confirmed safe — repo initialized after all secrets were env-only, `.env` in `.gitignore` (see Version Control section).
-- Everything else unchanged from previous entries (NBT patch manual, rate limits in-memory/`trust proxy` unconfigured, no CI/deploy/backup tooling).
+- `JWT_SECRET` storage: confirmed safe — repo initialized after all secrets were
+  env-only, `.env` in `.gitignore` (see Version Control).
+- Committed source files carry cosmetic UTF-8 encoding artifacts (BOM on some
+  first lines, em-dashes stored as `â€”`) from an early editing pass — comments
+  only, harmless, left as-is to avoid churn.
+- Everything else unchanged from previous entries (NBT patch manual, rate limits
+  in-memory/`trust proxy` unconfigured, no CI/deploy/backup tooling).
 
 ## Next Recommended Task
-Every built feature and hardening item so far is fully verified except
-`trust proxy` config (needs a real reverse proxy to test). Ask the
-user what to prioritize next: more RP features (NPCs, world content,
-more admin tooling) or remaining lower-priority polish (`trust proxy`
-config, NBT patch automation, CI/deploy/backup).
+Core feature set is verified; the one explicitly-unverified item is `trust proxy`
+(needs a real reverse proxy). Recommended next order: Trust proxy verification →
+automated integration tests → NBT patch automation → inventory UI → RP
+gameplay/features → CI/deploy/backup. Ask the user which to prioritize.
 
 ## Do Not Change
 - One Discord account = one character
@@ -54,4 +85,6 @@ config, NBT patch automation, CI/deploy/backup).
 - Modular resource architecture
 - Backup/rollback requirements
 - AI changelog/handoff process
-
+- Wire-level API field names (`xuid` on `/bridge/character/link`, `playerId` on
+  `/bridge/player/join`) — renaming those is a coordinated behavior-pack +
+  backend change, do not do it as a DB-only rename.
