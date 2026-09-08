@@ -2,7 +2,7 @@
 
 ## Project State
 - Version: 0.1.0
-- This handoff describes the project state at commit `ab026f7` (see Version Control).
+- This handoff describes the project state at commit `fd50a2e` (see Version Control).
 - NOT a blanket "fully verified" claim: the core feature set is verified against
   real infrastructure; a small set of infrastructure-dependent paths remains
   explicitly unverified (listed below under **Unverified**).
@@ -68,8 +68,11 @@
 
 ## Version Control
 - Git repo initialized 2026-09-08.
-- Commit this handoff is based on: `ab026f7`. The 015 `persistent_id` rename
-  work is committed as `744f82b` (Complete persistent id rename).
+- Commit this handoff is based on: `fd50a2e` (roadmap implementation: character
+  lifecycle, player session/presence, economy wallet/deduct, inventory meta,
+  admin routes, bridge HMAC signing, automated integration tests).
+- The 015 `persistent_id` rename work is committed as `744f82b` (Complete
+  persistent id rename).
 - This reference is a **frozen anchor**: it is the project-state commit this
   handoff documents. Purely administrative commits (hash/ref touch-ups) may
   legitimately sit on top of it — check `git log` / `git rev-parse --short HEAD`
