@@ -105,12 +105,26 @@
     client to the last untrusted hop (the first proxy's IP), by design. Test
     that value against the actual deployment shape before relying on it.
 
+- Live BDS → backend chain for character session resolution (evidence dated
+  2026-09-08, before the 2026-09-09 foundation round): a real client
+  (`K2SirLao`, persistent_id `AC626455D87C6AD4`) joined after linking and the
+  backend auto-filled `character_id = 3` on the new `player_sessions` row (id 5)
+  with `left_at = NULL` and advancing `last_seen_at` — join/presence/heartbeat/
+  session-rotation/leave cycles confirmed in the same table (rows 3–4 closed with
+  `left_at` set). Remaining on the round-trip: leave → rejoin-without-`!link`
+  reconnect confirmation and a re-smoke on current HEAD — see Unverified.
+
 ## Unverified (needs infrastructure we don't have in a plain dev env)
-- Live Minecraft round-trip — full chain NOT tested: Minecraft Client → BDS →
-  Behavior Pack → signed HTTP → Backend → PostgreSQL/Redis → response. The
-  updated pack (signed calls, heartbeat, `playerLeave`) has NOT been deployed
-  to a real BDS world with a real client join. Do NOT mark the bridge path
-  "verified with real client joins" until that happens.
+- Live Minecraft round-trip — **mostly VERIFIED (evidence dated 2026-09-08,
+  pre-foundation-round HEAD)**: real client join → BDS → behavior pack → signed
+  HTTP → backend → PostgreSQL confirmed for join/presence/heartbeat/session
+  rotation/leave, `!link` code consume, persistent-id binding, and
+  character-session-resolve (a join after linking produced a session row with
+  `character_id` auto-filled). See Verified. Remaining on this item: (a) a final
+  leave → rejoin-without-`!link` reconnect confirmation (expect a new session id
+  carrying the same `character_id` with `left_at = NULL`), and (b) a quick
+  re-smoke on current HEAD, since `player_session` gained the stale-heartbeat
+  guard + concurrent-join idempotency in the 2026-09-09 round.
 - Real Discord OAuth — code exists (`GET /auth/discord/login` →
   oauth2/authorize → `/auth/discord/callback` → exchange code → upsert user →
   issue session) and is structurally covered by the HTTP-layer suite, but the
