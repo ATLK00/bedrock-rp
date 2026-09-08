@@ -11,12 +11,14 @@
 - Applied migrations **001–024** (new: `018_character_details`, `019_audit_columns`,
   `020_inventory_weight`, `021_economy_currencies`, `022_idempotency`, `023_security_events`,
   `024_cases`), all cleanly applied on the dev DB (`npm run migrate` skips all).
-- **Automated integration suite is now 17/17 PASS** against the real docker stack
+- **Automated integration suite is now 20/20 PASS** against the real docker stack
   (fresh `bedrock_rp_test` DB, migrations 001–024). New coverage: character
   details/confirm/lock + case-approval path, bank/red_money economy + anomaly +
   idempotency replay/mismatch, weight-aware inventory + container lifecycle,
   cases lifecycle, security-center feed/ack, health/readiness + security headers,
-  stale-heartbeat does not resurrect presence.
+  stale-heartbeat does not resurrect presence, parallel-debit row-lock safety
+  (no overspend), container exact-fill boundary, case permission matrix (privacy
+  + staff scope).
 - New modules: **Security Center** (`security_events` feed), **idempotency**
   (`idempotency_keys`, mis-match → 409), **cases/tickets** (player + staff routes).
   Extended: character (profile confirm/lock + change-request case flow), economy
@@ -34,6 +36,26 @@
 - Version-control note: this round is committed as `62f1ee8` (sits on top of
   the frozen anchor `fd50a2e`).
 - Full details in `CHANGELOG_AI.md` (2026-09-09 03:00 entry).
+
+## 2026-09-09 Round 2 — retention jobs, edge tests, rate-limit bugfix (`f70984d`)
+- New jobs (daily, started at boot, env-tunable): `sweepAcknowledgedSecurityEvents`
+  (acknowledged-only: unresolved threats never dropped) and
+  `sweepExpiredIdempotencyKeys` (keys only need to outlive the retry window).
+  Config: `SECURITY_EVENT_RETENTION_DAYS=90`, `IDEMPOTENCY_KEY_RETENTION_DAYS=7`.
+- Edge-case tests added (suite 17 → 20): (17) 10 parallel bank debits against a
+  5000 balance settle exactly 5/5 with the ledger ending at 0 — proves the
+  per-account row-lock anti-double-spend under concurrency; (18) container
+  capacity exact-fill boundary (950→1000 exact fits, 1050 rejects, remove 4
+  then re-add exactly the freed space); (19) case permission matrix — user A
+  cannot view/message user B's case, roleless B gets 403 on every `/admin/cases`
+  route, staff access + per-user scoping holds.
+- Real bug found & fixed by test 18's hang: the custom rate-limit `handler`
+  (`tripHandler`) never sent a response when throttled — a client past the
+  limit hung forever with no reply (suite's own admin traffic tripped the
+  60/min `adminLimiter` mid-run). Throttled requests now get `429`. Limits are
+  env-tunable (`RATE_LIMIT_AUTH_MAX`/`BRIDGE`/`ADMIN`) and the test env raises
+  them sky-high so the suite exercises behavior, not throttling.
+- Suite is 20/20 in ~5s on the docker stack.
 
 ## Verified (tested on real infrastructure)
 - Backend HTTP surface exercised against a live Express instance on the real
@@ -58,11 +80,11 @@
   fresh `bedrock_rp_test` DB each run, migrations 001–024 applied, HTTP-level
   coverage of auth/session, character, link, presence, RBAC, economy,
   inventory(meta+weight+containers), bridge auth, cases, security events.
-  Last recorded run: 17/17 PASS on 2026-09-09 (docker stack up). NOT
+  Last recorded run: 20/20 PASS on 2026-09-09 (docker stack up). NOT
   reproducible in an empty environment:
   IMPORTANT: this suite REQUIRES the docker Postgres/Redis stack to be up; in
   an environment with no stack running it exits with `ECONNREFUSED` and proves
-  nothing. Treat any 17/17 result as tied to the stack it ran against, not as a
+  nothing. Treat any 20/20 result as tied to the stack it ran against, not as a
   property of the repo alone.
 - Bridge hardening: HMAC-SHA256 request signing (drift window + Redis nonce
   replay rejection); legacy shared-secret-only clients still accepted. The
@@ -190,10 +212,11 @@ unusable, purely for table hygiene. Mirrors the trade-expiry job's exact pattern
   in-memory/`trust proxy` unconfigured, no CI/deploy/backup tooling).
 
 ## Next Recommended Task
-Automated integration tests (17/17 on the real docker stack), the signed+BDS
-pack, `trust proxy` (verified behind a real docker nginx), and the backend
+Automated integration tests (20/20 on the real docker stack), the signed+BDS
+pack, `trust proxy` (verified behind a real docker nginx), the backend
 foundation batch (character confirm/lock, multi-currency economy, containers,
-idempotency, cases, security center, OAuth state) are all done. Remaining
+idempotency, cases, security center, OAuth state) and the retention/rate-limit
+hardening round are all done. Remaining
 verified-gaps are the two genuinely external paths: (1) deploy the
 updated pack to a live server and confirm the heartbeat/leave + signed-call
 round-trip against real client joins; (2) complete a real Discord OAuth

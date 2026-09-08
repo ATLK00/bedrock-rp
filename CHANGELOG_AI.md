@@ -51,6 +51,78 @@
 
 ---
 
+## [2026-09-09 03:43] — AI: big-pickle (opencode) — Retention jobs + edge tests + rate-limit bugfix
+
+### Task
+Finish the backend hardening follow-ups requested by the user: add retention/cleanup
+jobs for the two append-only tables (`security_events`, `idempotency_keys`) that
+previously grew forever, add edge-case tests for the risky boundaries (concurrency,
+container capacity, case privacy), and (discovered while running them) fix a real
+latent bug where throttled clients hung forever.
+
+### Changed
+- `backend/src/modules/security/index.ts` — `sweepAcknowledgedSecurityEvents(retentionDays)`
+  + daily `startSecurityEventRetentionJob`/`stopSecurityEventRetentionJob`. Ack-only:
+  unacknowledged (unresolved) events are never dropped.
+- `backend/src/modules/idempotency/index.ts` — `sweepExpiredIdempotencyKeys(retentionDays)`
+  + daily `startIdempotencyRetentionJob`/`stopIdempotencyRetentionJob` (keys only need
+  to outlive the retry window).
+- `backend/src/index.ts` — both retention jobs started at boot; retention windows from
+  config (`SECURITY_EVENT_RETENTION_DAYS=90`, `IDEMPOTENCY_KEY_RETENTION_DAYS=7`).
+- `backend/src/middleware/rateLimit.ts` — **bugfix**: the custom `tripHandler` (custom
+  `handler` fully replaces express-rate-limit's default response) never sent a reply when
+  throttled, so every request past the limit hung forever with no response. Now answers
+  `429`. Limits are env-tunable via config (`RATE_LIMIT_AUTH_MAX`=10, `RATE_LIMIT_BRIDGE_MAX`=120,
+  `RATE_LIMIT_ADMIN_MAX`=60, defaults unchanged).
+- `backend/src/config/index.ts` + `.env.example` — the 3 rate-limit tiers + 2 retention vars.
+- `backend/src/test/integration.test.ts` — 3 new subtests (17→20) + test env now raises the
+  rate-limit tiers (the suite legitimately exceeds 60 admin req/min in one window).
+  - (17) economy: 10 parallel debits of 1000 vs a 5000 balance → exactly 5 succeed / 5
+    `InsufficientFundsError`, balance ends at 0, ledger has exactly 5 rows (proves the
+    per-wallet row-lock anti-double-spend).
+  - (18) inventory: container capacity exact-fill boundary (950→1000 exact fits, 1050 → 409,
+    remove 4 then re-add the freed space, empty + delete) — this one exposed the rate-limit hang.
+  - (19) cases: permission matrix — user A cannot view/message user B's case (403), roleless
+    B gets 403 on every `/admin/cases*` route, staff access + per-user list scoping holds.
+
+### Why
+Two append-only tables would grow without bound on a long-running server. Edge-case
+tests were recommended to close the "what if" gaps before declaring the backend done.
+While running them, the suite hung on test 18 — the root cause was the rate-limit
+`tripHandler` fallthrough (custom handler is authoritative, it must respond or call
+`next()`; it did neither → undici/raw clients waited forever). Confirmed via breadcrumbs +
+instrumenting express-rate-limit's own counters (`hits` crossed 60 within one window while
+only /admin routes froze and /health kept answering).
+
+### Dependencies / Impact
+- No DB schema change, no new migration. New env vars optional with same defaults.
+- Prod behavior change for throttled clients: 429 response instead of a silent hang.
+- Suite run time ~5s (was hanging indefinitely); 20/20.
+
+### Tests
+- [PASS] `npx tsc -p .` — clean build.
+- [PASS] `node --test --test-timeout=60000 dist/test/integration.test.js` — 20/20, ~5.2 s.
+- [PASS] `npm run build` earlier this round before the hang diagnosis.
+
+### Security
+- Throttling now completes with a `429` instead of an open-ended silent hang (a low-grade
+  DoS footgun). Rate-limit trip still emits `rate_limit_exceeded` security events.
+- Retention jobs intentionally never touch unacknowledged security events.
+
+### Known Issues
+- Node 24 `node --test <directory>` `Cannot find module` on bare directories (use glob form).
+- Instrumented probes removed; `node_modules` patches reverted; no stray files left.
+
+### Next Steps
+1. Optional CI gate on `npm run build` + `npm test` (needs docker stack).
+2. Remaining external verification: live BDS re-smoke on current HEAD + real Discord OAuth sign-in
+   (Discord already user-confirmed on 2026-09-09, not independently observed).
+
+### Handoff Notes
+- See AI_HANDOFF.md: round-2 section, 20/20 suite, `f70984d`.
+
+---
+
 ## [2026-09-09 03:00] — AI: big-pickle (opencode) — Backend foundation batch
 
 ### Task
