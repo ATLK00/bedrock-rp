@@ -1,6 +1,7 @@
 import { withTransaction, pool } from "../../db/pool.js";
 import { redis } from "../../cache/redis.js";
 import { config } from "../../config/index.js";
+import { publish } from "../../eventbus/index.js";
 
 /**
  * Player presence: "currently online" is a transient fact (Redis), while
@@ -61,11 +62,20 @@ export async function registerPlayerJoin(params: {
     );
     const characterId = charRows.length > 0 ? charRows[0].id : null;
 
-    await client.query(
-      `INSERT INTO player_sessions (persistent_id, player_name, character_id)
-       VALUES ($1, $2, $3)`,
-      [persistentId, params.playerName, characterId]
-    );
+    try {
+      await client.query(
+        `INSERT INTO player_sessions (persistent_id, player_name, character_id)
+         VALUES ($1, $2, $3)`,
+        [persistentId, params.playerName, characterId]
+      );
+    } catch (err: any) {
+      // 23505 from uq_player_sessions_one_active: two concurrent joins for
+      // the same player raced and the other one already opened the window.
+      // The reconnect semantics above keep exactly one open window, so a
+      // lost race is a successful (idempotent) join, not an error.
+      if (err?.code === "23505") return;
+      throw err;
+    }
 
     if (characterId !== null) {
       await client.query(
@@ -81,14 +91,38 @@ export async function registerPlayerJoin(params: {
     joinedAt: new Date().toISOString(),
     characterId: await resolveCharacterId(persistentId),
   });
+  publish({ type: "PLAYER_CONNECTED", persistentId, characterId: await resolveCharacterId(persistentId) });
 }
 
-/** Called from POST /bridge/player/heartbeat: refresh presence TTL + last_seen. */
+/**
+ * Called from POST /bridge/player/heartbeat: refresh presence TTL +
+ * last_seen. Guard: only a player with an OPEN session window may
+ * heartbeat. A heartbeat that arrives after the window was closed (or was
+ * never opened — reconnect after the join call was lost, etc.) is a
+ * stale/rogue packet: it must NOT revive presence for someone the DB says
+ * is offline, or we would report ghost players as online forever.
+ */
 export async function heartbeat(params: {
   persistentId: string;
   playerName: string;
 }): Promise<void> {
   const { persistentId } = params;
+
+  const { rows } = await pool.query(
+    `SELECT id FROM player_sessions WHERE persistent_id = $1 AND left_at IS NULL`,
+    [persistentId]
+  );
+  if (rows.length === 0) {
+    // Stale heartbeat — drop any lingering presence so a crash between
+    // leave and here can't leave a ghost.
+    try {
+      await redis.del(presenceKey(persistentId));
+    } catch {
+      /* best-effort */
+    }
+    return;
+  }
+
   await setPresence({
     persistentId,
     playerName: params.playerName,
@@ -115,7 +149,7 @@ export async function playerLeft(params: { persistentId: string }): Promise<void
   } catch {
     /* best-effort */
   }
-  await pool.query(
+  const { rowCount } = await pool.query(
     `UPDATE player_sessions SET left_at = now()
      WHERE persistent_id = $1 AND left_at IS NULL`,
     [persistentId]
@@ -125,6 +159,9 @@ export async function playerLeft(params: { persistentId: string }): Promise<void
      WHERE persistent_id = $1 AND is_deleted = false`,
     [persistentId]
   );
+  if (rowCount !== 0) {
+    publish({ type: "PLAYER_DISCONNECTED", persistentId });
+  }
 }
 
 /** List currently-online players (Redis presence). */

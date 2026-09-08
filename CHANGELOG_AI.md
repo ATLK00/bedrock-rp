@@ -51,7 +51,71 @@
 
 ---
 
-## [2026-09-09 00:09] — AI: big-pickle (opencode) — STATUS CORRECTION after independent review
+## [2026-09-09 03:00] — AI: big-pickle (opencode) — Backend foundation batch
+
+### Task
+Implement the "complete-backend-foundation-in-one-batch" roadmap per the 15-item
+task list from the 2026-09-09 session: character profile confirm/lock,
+session hardening, weight-based multi-container inventory, multi-currency economy,
+granular RBAC, audit columns, bridge/API security, DB integrity, idempotency,
+cases/tickets, security center, event-bus expansion, config/error/observability,
+automated tests coverage for all the above.
+
+### Changed
+- **Migrations (new, applied on dev DB):**
+  - `018_character_details.sql` — RP details columns + `confirmed_at`/`lock_version`, citizen_id UNIQUE, gender/dob CHECKs.
+  - `019_audit_columns.sql` — `audit_log` `request_id`/`before`/`after`/`reason`; granular permissions (`character.edit/lock/view`, `economy.view/anomaly`, `inventory.manage/view`, `case.create/manage`, `security.view/manage`, `audit.view`, `bridge.view`) granted to admin+owner, moderator subset.
+  - `020_inventory_weight.sql` — `items.weight_g`/`category`, `characters.carry_weight_g`, `inventories`, `inventory_items`.
+  - `021_economy_currencies.sql` — `wallet_balances` (BIGINT, bank/red_money only; cash stays on legacy `wallets`), `transactions.currency` DEFAULT cash.
+  - `022_idempotency.sql` — `idempotency_keys` (PK `id_key`+`scope`).
+  - `023_security_events.sql` — append-only `security_events` + severity/indexes.
+  - `024_cases.sql` — `case_categories`, `cases`, `case_messages`, `case_events`.
+- **Fixed migration runner double-release bug** in `backend/src/db/migrate.ts` (a `client.release()` in the catch block + `finally` masked real migration errors — now release happens only in `finally`).
+- **New modules:** `src/modules/security/` (Security Center), `src/modules/idempotency/` (`withIdempotencyKey` + `IdempotencyKeyMismatchError`), `src/modules/cases/` (model + player routes `/cases`).
+- **Extended modules:** `character` (details/confirm/lock/change-request/getById + `CHARACTER_CREATED`/`CONFIRMED` events), `economy` (currency-aware credit/debit/salary/fine/refund/purchase/transfer, anomaly events, wallet summary), `inventory` (weight checks + container model + player routes `/inventories`), `player_session` (concurrent-join 23505 idempotency, stale-heartbeat guard, connect/disconnect events), `admin` (audit viewer, security center, cases, character update/view, container CRUD, multi-currency grant/deduct reads), `bridge` (structured `logBridge`), `auth` routes (OAuth `state` login-CSRF + failure security events).
+- **Middleware/app:** new `src/middleware/security.ts` (security headers + CORS allowlist + JSON parse error handler), rate-limit trips emit security events, bad bridge secret/signature/replay emit events, `/health` + `/health/live` + `/health/ready`, global error handler with `code` field, fail-fast server timeouts in `src/index.ts`, `CORS_ORIGINS` + `ECONOMY_ANOMALY_THRESHOLD_CENTS` config keys (+ `.env.example`).
+- **Integration tests:** extended `src/test/integration.test.ts` 11 → 17 subtests covering character details/confirm/lock/case-approval, bank/red-money + anomaly + idempotency, weight/container lifecycle, cases lifecycle, security-center + health/headers, stale-heartbeat ghost-presence prevention.
+
+### Why
+Completes the backend-foundation queue in one pass while preserving backward
+compatibility (cash economy path/wire fields unchanged; old migration files
+untouched; new tables/columns added only via new migration files).
+
+### Dependencies / Impact
+- New DB tables/columns require `npm run migrate` (already applied to dev; test harness migrates its own `bedrock_rp_test`).
+- New env vars are OPTIONAL (`CORS_ORIGINS` empty = same-origin default; `ECONOMY_ANOMALY_THRESHOLD_CENTS` defaults to 1,000,000).
+- `caseId` is returned as a JSON number; admin `/character/update` also accepts a numeric-string `caseId` (Postgres bigint comes back as a string through node-pg).
+
+### Tests
+- [PASS] `npm run build` (tsc) clean.
+- [PASS] `npm test` — 17/17 integration tests pass (8,140 ms → ~6.3 s after fixes; throwaway `bedrock_rp_test` DB).
+- [PASS] `npm run migrate` on dev DB — all 001–024 applied / skipped cleanly.
+- Bugs caught by the new tests and fixed: (1) parameter `$1` collision in `updateOwnCharacterDetails` / `applyCharacterLockedChange` UPDATE statements (500 on details patch); (2) container-ownership strict compare `Number(x) !== characterId` (string) caused 403 on own containers; (3) admin `economy/grant` didn't map `IdempotencyKeyMismatchError` → 409 (only `deduct` did); (4) `getWalletSummary` returned BIGINT strings for bank/red_money.
+
+### Security
+- Wrong bridge secret, invalid/expired/replayed bridge signatures now raise `bridge_invalid_secret`/`bridge_invalid_signature`/`bridge_replay` security events (previously silent 401).
+- OAuth login-CSRF protection via `state` cookie round-trip; failed Discord logins emit `login_failure`/`login_banned_account` events.
+- Economy credits ≥ threshold raise HIGH `economy_anomaly` events; abusive-actor rate-limit trips log security events.
+- Locked character identity fields can only change through the staff case/approval path (`character.edit`), audited with before/after/reason.
+- All new admin routes are gated on granular permissions; owner bypass unchanged.
+
+### Known Issues
+- Live BDS ↔ backend round-trip and real Discord OAuth still UNVERIFIED on a live server (see AI_HANDOFF Pending) — implemented + HTTP/suite covered only.
+- `caseId` type is number in JSON everywhere now; the cases rows expose `bigint`s to direct SQL consumers.
+- No comments added to code beyond existing style; debug probe removed from tests.
+- Assistant-based agent notes: docs/MASTER_PROMPT.md unchanged this round.
+
+### Next Steps
+1. Optionally add CI for `npm run build` + `npm test` (needs docker stack).
+2. Live BDS + OAuth verification remains the only pending external validation.
+3. Consider authorizing `case.create`/`case.manage` grants on seeded roles once case UX is finalized.
+
+### Handoff Notes
+Dev DB migrated (001–024), build green, 17/17 tests green. Committed as a single
+commit for this shelf. Do NOT re-add `idx_audit_log_target` to any migration
+(it already lives in `017_db_integrity.sql`).
+
+---
 
 ### Why
 Independent review of `AI_HANDOFF.md` flagged overclaimed verification: entries

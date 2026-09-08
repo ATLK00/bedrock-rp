@@ -54,9 +54,8 @@ export async function runMigrations(targetPool: pg.Pool = pool): Promise<void> {
       await client.query(sql);
       await client.query("INSERT INTO _migrations (filename) VALUES ($1)", [file]);
       await client.query("COMMIT");
-    } catch (err) {
-      await client.query("ROLLBACK");
-      client.release();
+} catch (err) {
+      await client.query("ROLLBACK").catch(() => {});
       throw new Error(`migration FAILED on ${file}: ${String(err)}`);
     } finally {
       client.release();

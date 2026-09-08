@@ -14,6 +14,38 @@ audit-logged. Built per `docs/MASTER_PROMPT.md`.
 | Bridge (BDS ↔ backend) | HTTP over `@minecraft/server-net` (script side) ↔ Express (backend side) |
 | Auth | Discord OAuth2, 1 Discord account = 1 character |
 
+## Backend systems (2026-09-09)
+
+- **Character profile**: RP details (name, DOB, gender, nationality, citizen ID, bio, …),
+  confirm/lock after review, staff-approved edits via the case flow. `GET/PATCH /character/details`,
+  `POST /character/confirm`, `POST /character/change-request`.
+- **Multi-currency economy**: `cash` (legacy `wallets` path — unchanged wire shape),
+  `bank` and `red_money` (`wallet_balances`). Every move is ledgered in `transactions`
+  with a currency tag; admin grant/deduct accept `currency` + `idempotencyKey`.
+- **Weight-aware inventory + containers**: character carry limit (`carry_weight_g`),
+  weight-capped containers (vehicle/house/business/locker/warehouse), atomic
+  character ↔ container transfers. Player routes under `/inventories`, staff under `/admin/inventory/…`.
+- **Idempotency**: `idempotency_keys` — replay-safe admin economy/writes via
+  `Idempotency-Key` header or `idempotencyKey` body field (mismatched replay → 409).
+- **Security center**: append-only `security_events` feed (bad bridge secret/signature,
+  replays, OAuth failures, rate-limit trips, economy anomalies, server errors).
+  `GET /admin/security/events`, `POST /admin/security/events/:id/acknowledge`.
+- **Support cases**: bug/lost-item/character-issue/etc. tickets with timeline, staff
+  state machine (open → in_progress → resolved/closed/rejected). `POST/GET /cases`,
+  staff routes under `/admin/cases`.
+- **Ops hardening**: CORS allowlist + security headers middleware, `/health/live` +
+  `/health/ready`, fail-fast server timeouts, OAuth `state` (login-CSRF) protection,
+  structured bridge logs, global error handler with error codes.
+- **Admin surface**: audit-log viewer (`GET /admin/audit`, incl. `before/after/reason`),
+  multi-currency economy reads (`GET /admin/economy/character/:id`), container CRUD,
+  character update/view (locked-field approval path).
+
+Integration suite (`backend/src/test/integration.test.ts`) runs against a throwaway
+`bedrock_rp_test` DB (17 tests: auth, character create/link/delete/details-lock-case,
+bridge secret/signature/replay, presence + stale-heartbeat, RBAC, economy
+cash/bank/red-money/anomaly/idempotency, inventory weight + containers, cases, security events).
+Spec: `npm run migrate`, `npm run build`, `npm test` (needs `ops` docker stack up).
+
 **Not locked yet** — do not assume:
 - Exact BDS + Script API version (`@minecraft/server` is stable/2.0.0, but `@minecraft/server-net` is still Beta and its manifest version string is tied to your exact BDS build — see the note in `behavior_pack/manifest.json`)
 - Discord bot library (this iteration talks to Discord's REST API directly with `fetch`, no `discord.js` — revisit if bot-side features are needed later)

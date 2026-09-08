@@ -108,6 +108,12 @@ test("integration suite", async (t) => {
     post(path, body, cookieFor(token));
   const getAs = (path: string, token: string) => get(path, cookieFor(token));
   const delAs = (path: string, token: string) => del(path, cookieFor(token));
+  const patchAs = (path: string, body: unknown, token: string) =>
+    fetch(`${baseUrl}${path}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", ...cookieFor(token) },
+      body: JSON.stringify(body),
+    });
 
   // 1. auth
   await t.test("auth: session issue / verify / revoke", async () => {
@@ -505,6 +511,404 @@ test("integration suite", async (t) => {
     assert.equal(delRes.status, 204);
     const gone = await getAs("/character", ctx.tokenC);
     assert.equal(gone.status, 404);
+  });
+
+  // ---- Backend foundation: new systems -------------------------------
+
+  // 11. character RP details + confirmation/lock + case approval path
+  await t.test("character: details validation / confirm / lock / change-via-case", async () => {
+    // fresh user so we own its character end-to-end
+    const d = await ctx.upsertUserByDiscordId("1004", "UserD");
+    const tokenD = await ctx.issueSessionToken(d.id);
+    const created = await postAs("/character", { name: "David" }, tokenD);
+    assert.equal(created.status, 201);
+    const createdBody = await created.json();
+    const charD = { ...createdBody, id: Number(createdBody.id) };
+    ctx.charD = charD;
+    ctx.tokenD = tokenD;
+
+    // invalid details rejected
+    assert.equal(
+      (await patchAs("/character/details", { date_of_birth: "not-a-date" }, tokenD)).status,
+      400
+    );
+    assert.equal(
+      (await patchAs("/character/details", { date_of_birth: "1999-13-99" }, tokenD)).status,
+      400
+    );
+    assert.equal(
+      (await patchAs("/character/details", { gender: "unknown" }, tokenD)).status,
+      400
+    );
+    assert.equal(
+      (await patchAs("/character/details", { citizen_id: "ab!" }, tokenD)).status,
+      400
+    );
+    assert.equal(
+      (await patchAs("/character/details", { photo_url: "javascript:alert(1)" }, tokenD)).status,
+      400
+    );
+
+    // confirm requires identity fields
+    const confirmIncomplete = await postAs("/character/confirm", {}, tokenD);
+    assert.equal(confirmIncomplete.status, 400);
+
+    // valid details patch (locked fields editable BEFORE confirmation)
+    const patch = await patchAs(
+      "/character/details",
+      {
+        first_name: "David",
+        last_name: "Chan",
+        nickname: "Dave",
+        date_of_birth: "2000-01-01",
+        gender: "male",
+        nationality: "Thai",
+        citizen_id: "ABC-123",
+      },
+      tokenD
+    );
+    assert.equal(patch.status, 204);
+
+    // confirm locks identity fields
+    const confirm = await postAs("/character/confirm", {}, tokenD);
+    assert.equal(confirm.status, 204);
+    // idempotent
+    assert.equal((await postAs("/character/confirm", {}, tokenD)).status, 204);
+
+    const detailsRes = await getAs("/character/details", tokenD);
+    assert.equal(detailsRes.status, 200);
+    const details = await detailsRes.json();
+    assert.equal(details.confirmed, true);
+    assert.equal(details.lockVersion, 1);
+    assert.equal(details.details.first_name, "David");
+
+    // unlocked fields still editable after confirmation
+    assert.equal((await patchAs("/character/details", { nickname: "Davey" }, tokenD)).status, 204);
+
+    // locked fields refused after confirmation
+    const lockedEdit = await patchAs("/character/details", { last_name: "Chen" }, tokenD);
+    assert.equal(lockedEdit.status, 403);
+
+    // request a locked-field change via case
+    const changeReq = await postAs(
+      "/character/change-request",
+      { field: "last_name", value: "Chen", note: "legal name update" },
+      tokenD
+    );
+    assert.equal(changeReq.status, 201);
+    const { caseId } = await changeReq.json();
+
+    // staff approval (owner A) applies the change + resolves the case
+    const approve = await postAs(
+      "/admin/character/update",
+      { characterId: charD.id, changes: { last_name: "Chen" }, reason: "approved after review", caseId },
+      ctx.tokenA
+    );
+    assert.equal(approve.status, 204);
+
+    const after = await getAs("/character/details", tokenD);
+    const afterBody = await after.json();
+    assert.equal(afterBody.details.last_name, "Chen");
+    assert.ok(afterBody.lockVersion >= 2);
+
+    // the original case is now resolved
+    const myCases = await getAs("/cases", tokenD);
+    const casesBody = await myCases.json();
+    const theCase = casesBody.cases.find((c: any) => Number(c.id) === caseId);
+    assert.ok(theCase, "change-request case should exist");
+    assert.equal(theCase.status, "resolved");
+
+    // a player cannot view someone else's case
+    const otherCase = await getAs(`/cases/${caseId}`, ctx.tokenB);
+    assert.equal(otherCase.status, 403);
+  });
+
+  // 12. multi-currency economy + anomaly + idempotency
+  await t.test("economy: bank/red money + anomaly event + idempotency", async () => {
+    // bank / red money credit + debit via module API
+    await ctx.economy.credit({
+      characterId: ctx.charA.id,
+      amountCents: 1500,
+      reason: "bank deposit",
+      currency: "bank",
+      actorUserId: ctx.userA.id,
+    });
+    await ctx.economy.credit({
+      characterId: ctx.charA.id,
+      amountCents: 700,
+      reason: "red money income",
+      currency: "red_money",
+      actorUserId: ctx.userA.id,
+    });
+    const summary = await ctx.economy.getWalletSummary(ctx.charA.id);
+    assert.equal(summary.cashCents, 2000); // unchanged by bank/red ops (from earlier test)
+    assert.equal(summary.bankCents, 1500);
+    assert.equal(summary.redMoneyCents, 700);
+
+    const { rows } = await ctx.pool.query(
+      `SELECT count(*)::int AS n FROM transactions WHERE character_id = $1 AND currency = 'bank'`,
+      [ctx.charA.id]
+    );
+    assert.equal(rows[0].n, 1);
+
+    // bank debit anti-negative
+    await assert.rejects(
+      ctx.economy.debit({ characterId: ctx.charA.id, amountCents: 999999, reason: "overdraft", currency: "bank", actorUserId: null }),
+      ctx.economy.InsufficientFundsError
+    );
+
+    // anomaly: a credit >= threshold records a HIGH economy_anomaly event
+    await ctx.economy.credit({
+      characterId: ctx.charA.id,
+      amountCents: 1_000_000,
+      reason: "suspicious huge credit",
+      currency: "cash",
+      actorUserId: ctx.userA.id,
+    });
+    const sec = await getAs("/admin/security/events?severity=HIGH", ctx.tokenA);
+    const secBody = await sec.json();
+    assert.ok(
+      secBody.events.some((e: any) => e.event_type === "economy_anomaly"),
+      "economy anomaly event should be recorded"
+    );
+
+    // idempotency: same key + same body applies once
+    const first = await postAs(
+      "/admin/economy/grant",
+      { characterId: ctx.charB.id, amountCents: 300, reason: "idem grant", idempotencyKey: "k-grant-1" },
+      ctx.tokenA
+    );
+    assert.equal(first.status, 204);
+    const second = await postAs(
+      "/admin/economy/grant",
+      { characterId: ctx.charB.id, amountCents: 300, reason: "idem grant", idempotencyKey: "k-grant-1" },
+      ctx.tokenA
+    );
+    assert.equal(second.status, 204);
+
+    const bWallet = await (await getAs("/character/wallet", ctx.tokenB)).json();
+    assert.equal(bWallet.balanceCents, 1300); // 1000 transfer + 300 grant — replay did NOT double it
+
+    // same key + different body -> conflict
+    const conflict = await postAs(
+      "/admin/economy/grant",
+      { characterId: ctx.charB.id, amountCents: 500, reason: "different body", idempotencyKey: "k-grant-1" },
+      ctx.tokenA
+    );
+    assert.equal(conflict.status, 409);
+  });
+
+  // 13. weight-aware inventory + containers
+  await t.test("inventory: weight limit + container lifecycle", async () => {
+    // character carry limit (20kg default) — 1000 bandages at 50g = 50kg
+    const overWeight = await postAs(
+      "/admin/inventory/give",
+      { characterId: ctx.charB.id, itemId: "rp:bandage", quantity: 1000 },
+      ctx.tokenA
+    );
+    assert.equal(overWeight.status, 409);
+
+    // staff creates a container
+    const create = await postAs(
+      "/admin/inventory/containers",
+      { storageType: "warehouse", label: "Test Warehouse", capacityWeightG: 5000 },
+      ctx.tokenA
+    );
+    assert.equal(create.status, 201);
+    const containerId = Number((await create.json()).id);
+
+    // unrelated user cannot take from it (no owner -> owned by no one -> admin only)
+    // but the container is visible to staff inventory.view
+    const view = await getAs(`/admin/inventory/containers/${containerId}`, ctx.tokenA);
+    assert.equal(view.status, 200);
+    assert.equal((await view.json()).label, "Test Warehouse");
+
+    // add items; over-capacity rejected
+    const add = await postAs(
+      `/admin/inventory/containers/${containerId}/items`,
+      { itemId: "rp:bandage", quantity: 40 }, // 40 * 50g = 2000g (under 5000)
+      ctx.tokenA
+    );
+    assert.equal(add.status, 204);
+
+    const overCapacity = await postAs(
+      `/admin/inventory/containers/${containerId}/items`,
+      { itemId: "rp:bandage", quantity: 100 }, // +5000g would exceed 5000g total
+      ctx.tokenA
+    );
+    assert.equal(overCapacity.status, 409);
+
+    const items = await (await getAs(`/admin/inventory/containers/${containerId}`, ctx.tokenA)).json();
+    assert.equal(items.items.reduce((s: number, i: any) => s + i.quantity, 0), 40); // max_stack 16 → 16+16+8 rows
+    assert.equal(items.items.length, 3);
+    assert.equal(items.usedWeightG, 2000);
+
+    // player moves their own item INTO their own container
+    const ownContainer = await postAs(
+      "/admin/inventory/containers",
+      { storageType: "locker", ownerCharacterId: ctx.charB.id, capacityWeightG: 5000 },
+      ctx.tokenA
+    );
+    const ownContainerId = Number((await ownContainer.json()).id);
+
+    const moveIn = await postAs(
+      `/inventories/${ownContainerId}/items`,
+      { itemId: "rp:bandage", quantity: 5 },
+      ctx.tokenB
+    );
+    assert.equal(moveIn.status, 204);
+
+    // B's slots dropped by 5 and container holds 5
+    const bInv = await (await getAs("/character/inventory", ctx.tokenB)).json();
+    const plain = bInv.items.find((i: any) => Object.keys(i.item_metadata ?? {}).length === 0);
+    assert.equal(plain.quantity, 1);
+
+    const containerItems = await (await getAs(`/inventories/${ownContainerId}`, ctx.tokenB)).json();
+    assert.equal(containerItems.items[0].quantity, 5);
+
+    // deleting a non-empty container is refused
+    const delNonEmpty = await delAs(`/admin/inventory/containers/${ownContainerId}`, ctx.tokenA);
+    assert.equal(delNonEmpty.status, 409);
+
+    // take it back
+    const take = await postAs(
+      `/inventories/${ownContainerId}/take`,
+      { itemId: "rp:bandage", quantity: 5 },
+      ctx.tokenB
+    );
+    assert.equal(take.status, 204);
+    const bInv2 = await (await getAs("/character/inventory", ctx.tokenB)).json();
+    assert.equal(bInv2.items.find((i: any) => Object.keys(i.item_metadata ?? {}).length === 0).quantity, 6);
+
+    // player unrelated container access denied: B cannot touch warehouse A owns-less
+    // (warehouse has no owner in this test, so B is allowed — use B's own locker and a fake id)
+    const otherContainer = await getAs(`/inventories/99999`, ctx.tokenB);
+    assert.equal(otherContainer.status, 404);
+  });
+
+  // 14. cases: create / staff resolve / messages / permission
+  await t.test("cases: lifecycle + staff resolution", async () => {
+    // validation
+    const bad = await postAs("/cases", { category: "nope", subject: "x", description: "y" }, ctx.tokenA);
+    assert.equal(bad.status, 400);
+
+    const created = await postAs(
+      "/cases",
+      { category: "bug", subject: "Falling through floor", description: "Happens near the docks, please investigate" },
+      ctx.tokenA
+    );
+    assert.equal(created.status, 201);
+    const caseId = Number((await created.json()).caseId);
+
+    const mine = await getAs("/cases", ctx.tokenA);
+    const mineBody = await mine.json();
+    assert.ok(mineBody.cases.some((c: any) => Number(c.id) === caseId));
+
+    // staff can see all + resolve
+    const all = await getAs("/admin/cases", ctx.tokenA);
+    assert.equal(all.status, 200);
+    const statusChange = await postAs(
+      `/admin/cases/${caseId}/status`,
+      { status: "in_progress", note: "looking into it" },
+      ctx.tokenA
+    );
+    assert.equal(statusChange.status, 204);
+    const resolve = await postAs(
+      `/admin/cases/${caseId}/status`,
+      { status: "resolved", note: "fixed in next build" },
+      ctx.tokenA
+    );
+    assert.equal(resolve.status, 204);
+
+    const detail = await getAs(`/admin/cases/${caseId}`, ctx.tokenA);
+    const detailBody = await detail.json();
+    assert.equal(detailBody.status, "resolved");
+    assert.ok(detailBody.events.some((e: any) => e.event_type === "status_changed"));
+    assert.ok(detailBody.messages.length >= 1, "note message should exist");
+
+    // staff messages on a case
+    const staffMsg = await postAs(`/admin/cases/${caseId}/messages`, { body: "Root cause found." }, ctx.tokenA);
+    assert.equal(staffMsg.status, 204);
+
+    // invalid status rejected
+    const badStatus = await postAs(`/admin/cases/${caseId}/status`, { status: "banana" }, ctx.tokenA);
+    assert.equal(badStatus.status, 400);
+  });
+
+  // 15. security center wiring + health/headers
+  await t.test("security: events recorded + health/readiness + headers", async () => {
+    // triggering a bad bridge secret already wrote a HIGH event (test #3);
+    // confirm the feed shows bridge events
+    const sec = await getAs("/admin/security/events", ctx.tokenA);
+    const body = await sec.json();
+    assert.ok(
+      body.events.some((e: any) => e.event_type === "bridge_invalid_secret"),
+      "bridge_invalid_secret should be recorded"
+    );
+
+    // acknowledge works
+    const target = body.events.find((e: any) => e.event_type === "bridge_invalid_secret");
+    const ack = await postAs(`/admin/security/events/${target.id}/acknowledge`, {}, ctx.tokenA);
+    assert.equal(ack.status, 204);
+    const ackAgain = await postAs(`/admin/security/events/${target.id}/acknowledge`, {}, ctx.tokenA);
+    assert.equal(ackAgain.status, 404);
+
+    // audit log viewer (owner bypass)
+    const audit = await getAs("/admin/audit", ctx.tokenA);
+    assert.equal(audit.status, 200);
+    const auditBody = await audit.json();
+    assert.ok(Array.isArray(auditBody.entries) && auditBody.entries.length > 0);
+
+    // liveness/readiness + security headers
+    const live = await get("/health/live");
+    assert.equal(live.status, 200);
+    const ready = await get("/health/ready");
+    assert.equal(ready.status, 200);
+    const h = await get("/health");
+    assert.equal(h.headers.get("x-content-type-options"), "nosniff");
+    assert.equal(h.headers.get("x-frame-options"), "DENY");
+    assert.ok(h.headers.get("x-request-id"));
+  });
+
+  // 16. stale heartbeat does not resurrect presence
+  await t.test("presence: heartbeat after leave is ignored (no ghost presence)", async () => {
+    const body = JSON.stringify({ playerId: "p-B", playerName: "Bob" });
+    const join = await fetch(`${baseUrl}/bridge/player/join`, {
+      method: "POST",
+      headers: signedHeaders(BDS_SECRET, body),
+      body,
+    });
+    assert.equal(join.status, 204);
+
+    const hb = await fetch(`${baseUrl}/bridge/player/heartbeat`, {
+      method: "POST",
+      headers: signedHeaders(BDS_SECRET, body),
+      body,
+    });
+    assert.equal(hb.status, 204);
+
+    const leave = await fetch(`${baseUrl}/bridge/player/leave`, {
+      method: "POST",
+      headers: signedHeaders(BDS_SECRET, body),
+      body,
+    });
+    assert.equal(leave.status, 204);
+
+    // stale heartbeat AFTER leave
+    const stale = await fetch(`${baseUrl}/bridge/player/heartbeat`, {
+      method: "POST",
+      headers: signedHeaders(BDS_SECRET, body),
+      body,
+    });
+    assert.equal(stale.status, 204);
+
+    const online = await (await getAs("/admin/presence/online", ctx.tokenA)).json();
+    assert.ok(!online.online.some((p: any) => p.persistentId === "p-B"), "no ghost presence");
+
+    const { rows } = await pool.query(
+      `SELECT count(*)::int AS open FROM player_sessions WHERE persistent_id = 'p-B' AND left_at IS NULL`
+    );
+    assert.equal(rows[0].open, 0);
   });
 
   // cleanup

@@ -35,6 +35,17 @@ const EnvSchema = z.object({
   // How long a seen x-bds-nonce is remembered (Redis SET NX EX) to
   // reject exact replays of a captured request.
   BRIDGE_NONCE_TTL_SECONDS: z.coerce.number().default(600),
+  // Comma-separated browser origins allowed to call the session API with
+  // credentials (e.g. "http://localhost:5173,https://rp.example.com").
+  // CORS is only negotiated for requests that send an Origin header from
+  // this list; everything else is treated same-origin. Empty = no
+  // cross-origin access.
+  CORS_ORIGINS: z.string().default(""),
+  // A single credit at or above this many cents raises a HIGH severity
+  // economy-anomaly security event (duplicated grants, compromised admin,
+  // scaling bugs). Default 1,000,000 cents = 10,000 units of the 100-cent
+  // base currency.
+  ECONOMY_ANOMALY_THRESHOLD_CENTS: z.coerce.number().default(1_000_000),
 });
 
 const parsed = EnvSchema.safeParse(process.env);

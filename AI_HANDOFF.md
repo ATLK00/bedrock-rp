@@ -7,6 +7,35 @@
   real infrastructure; a small set of infrastructure-dependent paths remains
   explicitly unverified (listed below under **Unverified**).
 
+## 2026-09-09 Round — backend foundation batch (big-pickle/opencode)
+- Applied migrations **001–024** (new: `018_character_details`, `019_audit_columns`,
+  `020_inventory_weight`, `021_economy_currencies`, `022_idempotency`, `023_security_events`,
+  `024_cases`), all cleanly applied on the dev DB (`npm run migrate` skips all).
+- **Automated integration suite is now 17/17 PASS** against the real docker stack
+  (fresh `bedrock_rp_test` DB, migrations 001–024). New coverage: character
+  details/confirm/lock + case-approval path, bank/red_money economy + anomaly +
+  idempotency replay/mismatch, weight-aware inventory + container lifecycle,
+  cases lifecycle, security-center feed/ack, health/readiness + security headers,
+  stale-heartbeat does not resurrect presence.
+- New modules: **Security Center** (`security_events` feed), **idempotency**
+  (`idempotency_keys`, mis-match → 409), **cases/tickets** (player + staff routes).
+  Extended: character (profile confirm/lock + change-request case flow), economy
+  (currency-aware, anomalies), inventory (weight + containers), player_session
+  (concurrent-join idempotency, stale-heartbeat guard), admin (audit viewer,
+  security center, cases, container CRUD, character update/view), auth routes
+  (OAuth `state` login-CSRF + failure events), middleware/app (CORS allowlist,
+  security headers, `/health/live|ready`, fail-fast timeouts, bridge secret/sig
+  failures → security events).
+- Fixed by the new tests: (1) `$1` parameter collision in character details
+  UPDATE statements (details PATCH 500); (2) container-ownership strict compare of
+  `Number` vs pg-string (players got 403 on their own containers); (3) admin
+  `economy/grant` now maps idempotency mismatch → 409 like `deduct`; (4)
+  `getWalletSummary` coerces BIGINT bank/red_money to numbers.
+- Version-control note: this round is committed at the current `HEAD` after this
+  handoff's own commit is created — see `git log` (the "frozen anchor" rule below
+  applies: `fd50a2e` stays the state anchor, this round's commit sits on top).
+- Full details in `CHANGELOG_AI.md` (2026-09-09 03:00 entry).
+
 ## Verified (tested on real infrastructure)
 - Backend HTTP surface exercised against a live Express instance on the real
   docker Postgres/Redis stack: auth session issue/verify/revoke,
@@ -27,14 +56,14 @@
   open window" backstop; reconnect dedup verified at the HTTP layer, not with a
   live client).
 - Automated integration test suite (`backend/src/test/integration.test.ts`) —
-  fresh `bedrock_rp_test` DB each run, migrations 001–017 applied, HTTP-level
+  fresh `bedrock_rp_test` DB each run, migrations 001–024 applied, HTTP-level
   coverage of auth/session, character, link, presence, RBAC, economy,
-  inventory(meta), bridge auth. Last recorded run: 11/11 PASS on 2026-09-08;
-  re-run in the current env (2026-09-09 00:09, docker stack up) and reproduced
-  11/11 PASS. NOT reproducible in an empty environment:
+  inventory(meta+weight+containers), bridge auth, cases, security events.
+  Last recorded run: 17/17 PASS on 2026-09-09 (docker stack up). NOT
+  reproducible in an empty environment:
   IMPORTANT: this suite REQUIRES the docker Postgres/Redis stack to be up; in
   an environment with no stack running it exits with `ECONNREFUSED` and proves
-  nothing. Treat any 11/11 result as tied to the stack it ran against, not as a
+  nothing. Treat any 17/17 result as tied to the stack it ran against, not as a
   property of the repo alone.
 - Bridge hardening: HMAC-SHA256 request signing (drift window + Redis nonce
   replay rejection); legacy shared-secret-only clients still accepted. The
@@ -147,9 +176,11 @@ unusable, purely for table hygiene. Mirrors the trade-expiry job's exact pattern
   in-memory/`trust proxy` unconfigured, no CI/deploy/backup tooling).
 
 ## Next Recommended Task
-Automated integration tests (11/11 on the real docker stack), the signed+BDS
-pack, and `trust proxy` (verified behind a real docker nginx) are all done.
-Remaining verified-gaps are the two genuinely external paths: (1) deploy the
+Automated integration tests (17/17 on the real docker stack), the signed+BDS
+pack, `trust proxy` (verified behind a real docker nginx), and the backend
+foundation batch (character confirm/lock, multi-currency economy, containers,
+idempotency, cases, security center, OAuth state) are all done. Remaining
+verified-gaps are the two genuinely external paths: (1) deploy the
 updated pack to a live server and confirm the heartbeat/leave + signed-call
 round-trip against real client joins; (2) complete a real Discord OAuth
 sign-in. After those: CI gate on `npm run build` + `npm test`, NBT patch

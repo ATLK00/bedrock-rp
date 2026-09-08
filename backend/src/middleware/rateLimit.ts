@@ -1,4 +1,7 @@
 import rateLimit from "express-rate-limit";
+import type { Request } from "express";
+import { emitSecurityEvent } from "../modules/security/index.js";
+import type { SecuritySeverity } from "../eventbus/index.js";
 
 /**
  * Three tiers, matched to how sensitive/abusable each route group is:
@@ -21,7 +24,25 @@ import rateLimit from "express-rate-limit";
  * "false" (no proxy). If deployed behind a reverse proxy/load
  * balancer, TRUST_PROXY must be set correctly or these will all key
  * on the proxy's IP instead of the real client's.
+ *
+ * Every trip also records a security event (HIGH for auth — that's
+ * likely a brute-forcer; LOW for the API tiers — that's an abuser).
  */
+
+function tripHandler(severity: SecuritySeverity, tier: string) {
+  return (req: Request, res: import("express").Response) => {
+    emitSecurityEvent({
+      eventType: "rate_limit_exceeded",
+      severity,
+      ip: req.ip ?? null,
+      requestId: (req as unknown as { requestId?: string }).requestId ?? null,
+      targetType: "tier",
+      targetId: tier,
+      payload: { path: req.path },
+    }).catch(() => {});
+    if (res.headersSent) return res.end();
+  };
+}
 
 export const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
@@ -29,6 +50,7 @@ export const authLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: "too many auth attempts, try again later" },
+  handler: tripHandler("HIGH", "auth"),
 });
 
 export const bridgeLimiter = rateLimit({
@@ -37,6 +59,7 @@ export const bridgeLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: "bridge rate limit exceeded" },
+  handler: tripHandler("MEDIUM", "bridge"),
 });
 
 export const adminLimiter = rateLimit({
@@ -45,4 +68,5 @@ export const adminLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: "too many requests, slow down" },
+  handler: tripHandler("LOW", "admin"),
 });

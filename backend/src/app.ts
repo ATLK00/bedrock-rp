@@ -8,9 +8,13 @@ import { bridgeRouter } from "./modules/bridge/index.js";
 import { characterRouter } from "./modules/character/routes.js";
 import { tradeRouter } from "./modules/trade/routes.js";
 import { shopRouter } from "./modules/shop/routes.js";
+import { casesRouter } from "./modules/cases/routes.js";
+import { inventoryRouter } from "./modules/inventory/routes.js";
 import { authLimiter, bridgeLimiter, adminLimiter } from "./middleware/rateLimit.js";
 import { requestLogger } from "./middleware/logging.js";
+import { securityHeaders, cors, jsonParseError } from "./middleware/security.js";
 import { verifyBridgeSignature, BridgeSignatureError } from "./modules/bridge/signature.js";
+import { emitSecurityEvent } from "./modules/security/index.js";
 
 /**
  * Builds the Express app without starting a server or connecting to
@@ -33,6 +37,8 @@ export function createApp(): express.Express {
   app.set("trust proxy", trustProxySetting);
 
   app.use(requestLogger);
+  app.use(securityHeaders);
+  app.use(cors);
 
   // Capture the raw request body string so the bridge signature can be
   // verified byte-for-byte against what the behavior pack signed (the
@@ -56,6 +62,13 @@ export function createApp(): express.Express {
   app.use("/bridge", async (req, res, next) => {
     const secret = req.header("x-bds-bridge-secret");
     if (secret !== config.BDS_BRIDGE_SECRET) {
+      emitSecurityEvent({
+        eventType: "bridge_invalid_secret",
+        severity: "HIGH",
+        ip: req.ip ?? null,
+        requestId: (req as unknown as { requestId?: string }).requestId ?? null,
+        payload: { path: req.path },
+      }).catch(() => {});
       return res.status(401).json({ error: "invalid bridge secret" });
     }
 
@@ -79,6 +92,16 @@ export function createApp(): express.Express {
       next();
     } catch (err: any) {
       if (err instanceof BridgeSignatureError) {
+        // Security Center: a failed signature is either an attacker or a
+        // broken client — either way staff should be able to see it.
+        const msg: string = err?.message ?? "signature failure";
+        emitSecurityEvent({
+          eventType: msg === "replayed nonce" ? "bridge_replay" : "bridge_invalid_signature",
+          severity: msg === "replayed nonce" ? "HIGH" : "MEDIUM",
+          ip: req.ip ?? null,
+          requestId: (req as unknown as { requestId?: string }).requestId ?? null,
+          payload: { detail: msg, path: req.path },
+        }).catch(() => {});
         return res.status(401).json({ error: "invalid bridge signature" });
       }
       next(err); // let the global error handler deal with unexpected failures
@@ -86,14 +109,32 @@ export function createApp(): express.Express {
   });
 
   app.get("/health", (_req, res) => res.json({ status: "ok" }));
+  app.get("/health/live", (_req, res) => res.json({ status: "ok" }));
+  app.get("/health/ready", async (_req, res) => {
+    try {
+      const { pool } = await import("./db/pool.js");
+      await pool.query("SELECT 1");
+      const { redis } = await import("./cache/redis.js");
+      await redis.ping();
+      res.json({ status: "ok", checks: { db: "ok", redis: "ok" } });
+    } catch (err) {
+      res.status(503).json({ status: "degraded", error: "dependency check failed" });
+    }
+  });
 
   app.use("/auth", authLimiter, authRouter);
   app.use("/character/link-code", adminLimiter); // reuse the moderate tier — session-authenticated, not the tightest surface
   app.use("/character", characterRouter);
   app.use("/trade", adminLimiter, tradeRouter);
   app.use("/shop", adminLimiter, shopRouter);
+  app.use("/cases", adminLimiter, casesRouter);
+  app.use("/inventories", adminLimiter, inventoryRouter);
   app.use("/bridge", bridgeLimiter, bridgeRouter);
   app.use("/admin", adminLimiter, adminRouter);
+
+  // Normalize body-parse failures (invalid JSON, body too large) before the
+  // generic handler so they get our standard error shape, not HTML/stack.
+  app.use(jsonParseError);
 
   // Global error handler — last line of defense.
   app.use((err: any, req: express.Request, res: express.Response, _next: express.NextFunction) => {
@@ -101,12 +142,21 @@ export function createApp(): express.Express {
     const requestId = (req as unknown as { requestId?: string }).requestId ?? "unknown";
     if (status >= 500) {
       console.error(`[error] ${requestId}:`, err);
+      // Security Center: unexpected server errors are worth surfacing.
+      emitSecurityEvent({
+        eventType: "server_error",
+        severity: "MEDIUM",
+        ip: req.ip ?? null,
+        requestId: requestId === "unknown" ? null : requestId,
+        payload: { path: req.path },
+      }).catch(() => {});
     }
     if (res.headersSent) {
       return res.end();
     }
     res.status(status).json({
       error: status >= 500 ? "internal error" : err?.message ?? "bad request",
+      code: status >= 500 ? "internal_error" : (err?.code as string | undefined) ?? "bad_request",
       requestId,
     });
   });

@@ -9,9 +9,15 @@ async function main() {
   startExpiryJob(); // periodic: marks pending trades older than 24h as expired
   startSessionCleanupJob(); // periodic: deletes expired/revoked sessions rows
   const app = createApp();
-  app.listen(config.PORT, () => {
+  const server = app.listen(config.PORT, () => {
     console.log(`[backend] listening on :${config.PORT} (${config.NODE_ENV})`);
   });
+  // Fail fast on slow/stuck handlers instead of holding connections open
+  // indefinitely (Node's default is 5 minutes).
+  server.requestTimeout = 30_000;
+  server.timeout = 30_000;
+  server.keepAliveTimeout = 5_000;
+  server.headersTimeout = 10_000;
 }
 
 // ES module top-level await is available; but keep the explicit catch for a
