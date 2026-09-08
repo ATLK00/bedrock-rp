@@ -31,9 +31,8 @@
   `Number` vs pg-string (players got 403 on their own containers); (3) admin
   `economy/grant` now maps idempotency mismatch → 409 like `deduct`; (4)
   `getWalletSummary` coerces BIGINT bank/red_money to numbers.
-- Version-control note: this round is committed at the current `HEAD` after this
-  handoff's own commit is created — see `git log` (the "frozen anchor" rule below
-  applies: `fd50a2e` stays the state anchor, this round's commit sits on top).
+- Version-control note: this round is committed as `62f1ee8` (sits on top of
+  the frozen anchor `fd50a2e`).
 - Full details in `CHANGELOG_AI.md` (2026-09-09 03:00 entry).
 
 ## Verified (tested on real infrastructure)
