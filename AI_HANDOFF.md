@@ -8,33 +8,46 @@
   explicitly unverified (listed below under **Unverified**).
 
 ## Verified (tested on real infrastructure)
-- Backend: auth (Discord OAuth login, JWT+jti sessions, revocation on ban,
-  per-session logout, rate limiting, jti/user_id cross-check), RBAC (permissions,
-  boundaries, hierarchy, rank — all exercised via real requests), audit log,
-  economy (transfer/grant), character whitelist, character linking (via the
-  in-game `!link` flow end-to-end on a real client), inventory, trading
-  (+ anti-scam rollback, + expiry job), shop (buy/sell + catalog management +
-  single-listing read + stock-limit rollback) — all verified via real requests.
+- Backend HTTP surface exercised against a live Express instance on the real
+  docker Postgres/Redis stack: auth session issue/verify/revoke,
+  per-session logout, revocation on ban, rate limiting, jti/user_id
+  cross-check; RBAC (permissions, boundaries, hierarchy, rank); audit log;
+  economy (transfer/grant); character whitelist; inventory; trading
+  (+ anti-scam rollback, + expiry job); shop (buy/sell + catalog management +
+  single-listing read + stock-limit rollback) — all "real requests" here means
+  HTTP requests to the running backend. The live Discord OAuth code-exchange
+  (browser → Discord → callback) was NOT exercised (no real app) — see
+  Unverified.
 - Character lifecycle: `GET/POST/DELETE /character`, soft-delete keeps
-  wallet/ledger history and clears the link; CSPRNG link codes.
+  wallet/ledger history and clears the link; CSPRNG link codes. Verified at
+  the HTTP layer; the in-game `!link` flow on a real Minecraft client is NOT
+  verified — see Unverified.
 - Player presence/session history: `POST /bridge/player/join|leave|heartbeat`
   (Redis presence TTL + Postgres `player_sessions` with a partial-unique "one
-  open window" backstop; reconnect dedup verified in tests).
+  open window" backstop; reconnect dedup verified at the HTTP layer, not with a
+  live client).
 - Automated integration test suite (`backend/src/test/integration.test.ts`) —
   fresh `bedrock_rp_test` DB each run, migrations 001–017 applied, HTTP-level
   coverage of auth/session, character, link, presence, RBAC, economy,
-  inventory(meta), bridge auth. `npm test` = 11/11 (verified 2026-09-08).
+  inventory(meta), bridge auth. Last recorded run: 11/11 PASS on 2026-09-08;
+  re-run in the current env (2026-09-09 00:09, docker stack up) and reproduced
+  11/11 PASS. NOT reproducible in an empty environment:
+  IMPORTANT: this suite REQUIRES the docker Postgres/Redis stack to be up; in
+  an environment with no stack running it exits with `ECONNREFUSED` and proves
+  nothing. Treat any 11/11 result as tied to the stack it ran against, not as a
+  property of the repo alone.
 - Bridge hardening: HMAC-SHA256 request signing (drift window + Redis nonce
-  replay rejection); legacy shared-secret-only clients still accepted. BDS pack
-  signs every call via pure-JS `crypto_hmac.js` (RFC 4231 ASCII vectors +
-  node:crypto cross-checks).
+  replay rejection); legacy shared-secret-only clients still accepted. The
+  pure-JS `crypto_hmac.js` is verified offline (RFC 4231 ASCII vectors +
+  node:crypto multi-block/emoji cross-checks) and the *middleware/client* sides
+  are covered by HTTP-layer tests; the full BDS pack → backend signed round
+  trip on a live server is NOT verified — see Unverified.
 - DB integrity pass (migration 017): hot-path indexes + slot consistency CHECK.
 - Bugs found by the new suite and fixed: (1) `issueSessionToken` signed BIGINT
   ids as strings → every DB-derived session failed verification; (2) admin
   `/inventory/give` dropped `meta`; (3) `BridgeSignatureError.name` defaulted to
   "Error" → signature failures returned 500 instead of 401. Admin `/economy/
   deduct`, `/roles`, `/users/:id/roles`, `/presence/online` routes live.
-- BDS + Script API + HTTP bridge — verified with real client joins.
 - Session/jti security fix: `verifySessionToken()` cross-checks
   `session.user_id === payload.sub`, closing an impersonation path that existed
   if `JWT_SECRET` ever leaked.
@@ -65,18 +78,29 @@
     that value against the actual deployment shape before relying on it.
 
 ## Unverified (needs infrastructure we don't have in a plain dev env)
-- (empty) — the previously-listed `trust proxy` item was verified with a real
-  docker nginx reverse proxy on 2026-09-08 (see Verified section). Verified via
-  harnessed API is the state of everything else; the two remaining genuinely
-  external paths are the live Minecraft-client round-trip and a real Discord
-  OAuth sign-in, which are tracked under Pending, not Unverified.
+- Live Minecraft round-trip — full chain NOT tested: Minecraft Client → BDS →
+  Behavior Pack → signed HTTP → Backend → PostgreSQL/Redis → response. The
+  updated pack (signed calls, heartbeat, `playerLeave`) has NOT been deployed
+  to a real BDS world with a real client join. Do NOT mark the bridge path
+  "verified with real client joins" until that happens.
+- Real Discord OAuth — code exists (`GET /auth/discord/login` →
+  oauth2/authorize → `/auth/discord/callback` → exchange code → upsert user →
+  issue session) and is structurally covered by the HTTP-layer suite, but the
+  actual code-exchange against Discord's API with a real app has NOT been run.
+  Do NOT mark Discord OAuth verified until a real sign-in completes.
+- `trust proxy` upstream shapes: verified against a single-hop docker nginx
+  (see Verified); multi-hop/load-balanced shapes still depend on the real
+  deployment and the documented caveat applies.
 
 ## Pending (features/tooling not built yet — not blocked items)
 - Automate the `level.dat` NBT patch for Beta-APIs worlds (currently manual, see README).
 - Decide inventory size/UI approach before player-facing.
 - CI/deploy/backup tooling (rake the `npm test` + `npm run build` gates into CI).
 - Deploy the updated behavior pack to a live server and verify the
-  heartbeat/leave + signed-call round-trip against real client joins.
+  heartbeat/leave + signed-call round-trip against real client joins
+  (= close the UNVERIFIED live Minecraft round-trip above).
+- Complete a real Discord OAuth sign-in with a real app
+  (= close the UNVERIFIED Discord OAuth item above).
 
 > Note: the `characters.xuid` rename is DONE (migration 015) — do not treat it
 > as pending. Historical CHANGELOG entries that mention it as pending are

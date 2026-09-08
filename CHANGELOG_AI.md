@@ -51,6 +51,57 @@
 
 ---
 
+## [2026-09-09 00:09] — AI: big-pickle (opencode) — STATUS CORRECTION after independent review
+
+### Why
+Independent review of `AI_HANDOFF.md` flagged overclaimed verification: entries
+said live behavior-pack/BDS bridge and Discord OAuth were "verified with real
+client joins / real requests". They are not. Both are implemented and have
+automated/mock/HTTP-layer coverage, but the FULL live chains below have NOT run,
+so those claims were removed from Verified and re-homed in Unverified/Pending.
+
+### Live Minecraft round-trip — NOT verified (moved to Unverified/Pending)
+Chain still untested live: Minecraft Client → BDS → Behavior Pack → signed HTTP
+→ Backend → PostgreSQL/Redis → response.
+- Reasons: no deployment of the updated `behavior_pack/` (signed calls,
+  heartbeat, `playerLeave`) into a real BDS world with a real client join in
+  this work cycle. Historical `!link` end-to-end runs in CHANGELOG (e.g.
+  [2026-09-05 15:42] entry, "closes character linking end-to-end, for real, on a
+  real client") predate the main.js rewrite and used the then-current pack, NOT
+  the signed/heartbeat rewrite from this batch.
+
+### Real Discord OAuth — NOT verified (moved to Unverified/Pending)
+- Code exists and is structurally covered (`GET /auth/discord/login` →
+  `oauth2/authorize` → `/auth/discord/callback` → exchange code → upsert user →
+  issue session), but the code-exchange against Discord's API with a real app
+  has never been run. Lowercase truth: implemented, coverage partial, real flow
+  pending.
+
+### npm test status — tied to the running stack, not a repo property
+- The 11/11 PASS figures in previous entries were recorded against the docker
+  Postgres/Redis stack being UP at that moment. In a bare environment with no
+  stack, the suite exits with `ECONNREFUSED` (proves nothing).
+- Reproduced a CURRENT-round run in this env (docker stack up, 2026-09-09
+  00:09): `tests 11, pass 11, fail 0`. Record it as such — do not recycle the
+  old figure as today's result.
+
+### Files
+- `AI_HANDOFF.md`: Verified section narrowed to what was actually exercised;
+  overclaims removed; Unverified reinstated (live Minecraft round-trip, real
+  Discord OAuth, multi-hop trust-proxy shapes); Pending + Next Recommended Task
+  updated to close those two gaps.
+
+### Tests
+- [PASS] `npm test` re-run 2026-09-09 00:09 in this env (stack up): 11/11.
+- No other code changed in this entry.
+
+### Next Steps
+- Deploy updated behavior pack to a real BDS world; confirm join → signed
+  heartbeat → leave against a real client (closes round-trip gap).
+- Complete a real Discord OAuth sign-in with a real app.
+
+---
+
 ## [2026-09-08 23:35] — AI: big-pickle (opencode)
 
 ### Task
