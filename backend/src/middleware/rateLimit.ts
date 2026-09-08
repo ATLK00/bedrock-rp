@@ -1,6 +1,7 @@
 import rateLimit from "express-rate-limit";
 import type { Request } from "express";
 import { emitSecurityEvent } from "../modules/security/index.js";
+import { config } from "../config/index.js";
 import type { SecuritySeverity } from "../eventbus/index.js";
 
 /**
@@ -29,7 +30,7 @@ import type { SecuritySeverity } from "../eventbus/index.js";
  * likely a brute-forcer; LOW for the API tiers — that's an abuser).
  */
 
-function tripHandler(severity: SecuritySeverity, tier: string) {
+function tripHandler(severity: SecuritySeverity, tier: string, message: string) {
   return (req: Request, res: import("express").Response) => {
     emitSecurityEvent({
       eventType: "rate_limit_exceeded",
@@ -40,33 +41,37 @@ function tripHandler(severity: SecuritySeverity, tier: string) {
       targetId: tier,
       payload: { path: req.path },
     }).catch(() => {});
+    // The custom `handler` fully replaces express-rate-limit's default
+    // response — it must always answer or call next(), otherwise a
+    // throttled client hangs forever with no reply.
     if (res.headersSent) return res.end();
+    res.status(429).json({ error: message });
   };
 }
 
 export const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  limit: 10,
+  limit: config.RATE_LIMIT_AUTH_MAX,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: "too many auth attempts, try again later" },
-  handler: tripHandler("HIGH", "auth"),
+  handler: tripHandler("HIGH", "auth", "too many auth attempts, try again later"),
 });
 
 export const bridgeLimiter = rateLimit({
   windowMs: 60 * 1000, // 1 minute
-  limit: 120, // generous — a busy server with many concurrent players is legitimate
+  limit: config.RATE_LIMIT_BRIDGE_MAX, // generous — a busy server with many concurrent players is legitimate
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: "bridge rate limit exceeded" },
-  handler: tripHandler("MEDIUM", "bridge"),
+  handler: tripHandler("MEDIUM", "bridge", "bridge rate limit exceeded"),
 });
 
 export const adminLimiter = rateLimit({
   windowMs: 60 * 1000,
-  limit: 60,
+  limit: config.RATE_LIMIT_ADMIN_MAX,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: "too many requests, slow down" },
-  handler: tripHandler("LOW", "admin"),
+  handler: tripHandler("LOW", "admin", "too many requests, slow down"),
 });

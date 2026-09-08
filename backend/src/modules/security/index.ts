@@ -97,3 +97,44 @@ export async function acknowledgeSecurityEvent(params: { eventId: number; actorU
   );
   return true;
 }
+
+/**
+ * Deletes acknowledged security events older than `retentionDays`. Unresolved
+ * (never-acknowledged) events are kept — an open threat is never silently
+ * dropped. Kept separate from emit/ack so the feed never loses a row that did
+ * not state acked; this is purely table hygiene.
+ */
+export async function sweepAcknowledgedSecurityEvents(retentionDays: number): Promise<number> {
+  const { rowCount } = await pool.query(
+    `DELETE FROM security_events
+     WHERE acknowledged_at IS NOT NULL
+       AND created_at < now() - make_interval(days => $1)`,
+    [retentionDays]
+  );
+  return rowCount ?? 0;
+}
+
+let securityRetentionHandle: ReturnType<typeof setInterval> | null = null;
+
+/** Starts a daily job that deletes acknowledged security events past retention. Call once at backend startup. */
+export function startSecurityEventRetentionJob(
+  retentionDays = 90,
+  intervalMs = 24 * 60 * 60 * 1000
+) {
+  if (securityRetentionHandle) return;
+  securityRetentionHandle = setInterval(async () => {
+    try {
+      const count = await sweepAcknowledgedSecurityEvents(retentionDays);
+      if (count > 0) console.log(`[security] swept ${count} acknowledged event(s) past ${retentionDays}d`);
+    } catch (err) {
+      console.error("[security] retention job failed", err);
+    }
+  }, intervalMs);
+}
+
+export function stopSecurityEventRetentionJob() {
+  if (securityRetentionHandle) {
+    clearInterval(securityRetentionHandle);
+    securityRetentionHandle = null;
+  }
+}

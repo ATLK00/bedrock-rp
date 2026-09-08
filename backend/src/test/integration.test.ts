@@ -31,6 +31,14 @@ async function prepareTestDatabase() {
   process.env.REDIS_URL = "redis://localhost:6379";
   process.env.BDS_BRIDGE_SECRET = BDS_SECRET;
   process.env.JWT_SECRET = "test-jwt-secret-0123456789abcdefghijklmnopqrstuv";
+  // The suite legitimately fires far more than the default per-window
+  // limits (esp. /admin) while covering all surfaces; raise the tiers so
+  // the tests exercise behavior, not throttling. The 429 path is still
+  // covered implicitly by asserts on 401/403 responses... and remains easy
+  // to test directly if a dedicated rate-limit test is ever added.
+  process.env.RATE_LIMIT_AUTH_MAX = "100000";
+  process.env.RATE_LIMIT_BRIDGE_MAX = "100000";
+  process.env.RATE_LIMIT_ADMIN_MAX = "100000";
 
   // All backend modules must be imported AFTER the env vars above are set —
   // pool/redis/config snapshot env at import time.
@@ -909,6 +917,155 @@ test("integration suite", async (t) => {
       `SELECT count(*)::int AS open FROM player_sessions WHERE persistent_id = 'p-B' AND left_at IS NULL`
     );
     assert.equal(rows[0].open, 0);
+  });
+
+  // 17. concurrent debits never overspend (row-lock anti-double-spend)
+  await t.test("economy: parallel debits can't overspend (row-lock safety)", async () => {
+    await ctx.economy.credit({
+      characterId: ctx.charB.id,
+      amountCents: 5000,
+      reason: "concurrency seed",
+      currency: "bank",
+      actorUserId: ctx.userA.id,
+    });
+
+    const results = await Promise.allSettled(
+      Array.from({ length: 10 }, (_, i) =>
+        ctx.economy.debit({
+          characterId: ctx.charB.id,
+          amountCents: 1000,
+          reason: `parallel debit ${i}`,
+          currency: "bank",
+          actorUserId: null,
+        })
+      )
+    );
+    const ok = results.filter((r) => r.status === "fulfilled").length;
+    const rejected = results.filter((r) => r.status === "rejected");
+    assert.equal(ok, 5, "only 5 of 10 debits fit in a 5000 balance");
+    assert.equal(rejected.length, 5);
+    assert.equal(
+      rejected.filter((r) => r.reason instanceof ctx.economy.InsufficientFundsError).length,
+      5,
+      "all overspent debits must fail with InsufficientFundsError"
+    );
+
+    const after = await ctx.economy.getWalletSummary(ctx.charB.id);
+    assert.equal(after.bankCents, 0, "balance must end at exactly 0, never negative");
+
+    const { rows } = await pool.query(
+      `SELECT count(*)::int AS n FROM transactions WHERE character_id = $1 AND currency = 'bank' AND amount_cents = -1000`,
+      [ctx.charB.id]
+    );
+    assert.equal(rows[0].n, 5, "ledger must have exactly 5 debits applied");
+  });
+
+  // 18. container capacity exact-fill boundary
+  await t.test("inventory: container capacity exact-fill boundary", async () => {
+    const create = await postAs(
+      "/admin/inventory/containers",
+      { storageType: "warehouse", label: "Boundary Warehouse", capacityWeightG: 1000 },
+      ctx.tokenA
+    );
+    assert.equal(create.status, 201);
+    const containerId = Number((await create.json()).id);
+
+    // 19 * 50g = 950g — under capacity
+    let add = await postAs(
+      `/admin/inventory/containers/${containerId}/items`,
+      { itemId: "rp:bandage", quantity: 19 },
+      ctx.tokenA
+    );
+    assert.equal(add.status, 204);
+
+    // +1 = exactly 1000g, the boundary still fits
+    add = await postAs(
+      `/admin/inventory/containers/${containerId}/items`,
+      { itemId: "rp:bandage", quantity: 1 },
+      ctx.tokenA
+    );
+    assert.equal(add.status, 204);
+
+    let c = await (await getAs(`/admin/inventory/containers/${containerId}`, ctx.tokenA)).json();
+    assert.equal(c.usedWeightG, 1000, "exact capacity reached");
+    assert.equal(c.items.reduce((s: number, i: any) => s + i.quantity, 0), 20);
+
+    // +1 more = 1050g → 409
+    add = await postAs(
+      `/admin/inventory/containers/${containerId}/items`,
+      { itemId: "rp:bandage", quantity: 1 },
+      ctx.tokenA
+    );
+    assert.equal(add.status, 409);
+
+    // remove 4 (200g), then re-add exactly the freed space
+    const remove = await postAs(
+      `/admin/inventory/containers/${containerId}/items/remove`,
+      { itemId: "rp:bandage", quantity: 4 },
+      ctx.tokenA
+    );
+    assert.equal(remove.status, 204);
+    c = await (await getAs(`/admin/inventory/containers/${containerId}`, ctx.tokenA)).json();
+    assert.equal(c.usedWeightG, 800);
+
+    add = await postAs(
+      `/admin/inventory/containers/${containerId}/items`,
+      { itemId: "rp:bandage", quantity: 4 },
+      ctx.tokenA
+    );
+    assert.equal(add.status, 204);
+    c = await (await getAs(`/admin/inventory/containers/${containerId}`, ctx.tokenA)).json();
+    assert.equal(c.usedWeightG, 1000);
+
+    // cleanup: empty then delete
+    await postAs(
+      `/admin/inventory/containers/${containerId}/items/remove`,
+      { itemId: "rp:bandage", quantity: 20 },
+      ctx.tokenA
+    );
+    const del = await delAs(`/admin/inventory/containers/${containerId}`, ctx.tokenA);
+    assert.equal(del.status, 204);
+  });
+
+  // 19. case permission matrix (privacy + staff scope)
+  await t.test("cases: permission matrix (privacy + staff scope)", async () => {
+    const created = await postAs(
+      "/cases",
+      { category: "bug", subject: "B's private case", description: "Only B and staff should ever see this one" },
+      ctx.tokenB
+    );
+    assert.equal(created.status, 201);
+    const caseId = Number((await created.json()).caseId);
+
+    // different user (A) cannot view or message B's case
+    const aView = await getAs(`/cases/${caseId}`, ctx.tokenA);
+    assert.equal(aView.status, 403);
+    const aMsg = await postAs(`/cases/${caseId}/messages`, { body: "intrusion" }, ctx.tokenA);
+    assert.equal(aMsg.status, 403);
+
+    // non-staff (B) cannot use staff endpoints
+    const bStaffStatus = await postAs(`/admin/cases/${caseId}/status`, { status: "resolved", note: "self-resolve" }, ctx.tokenB);
+    assert.equal(bStaffStatus.status, 403);
+    const bAll = await getAs("/admin/cases", ctx.tokenB);
+    assert.equal(bAll.status, 403);
+    const bAck = await postAs(`/admin/cases/${caseId}/messages`, { body: "staff-only reply" }, ctx.tokenB);
+    assert.equal(bAck.status, 403);
+
+    // staff sees the case + converses; owner cannot see other users' cases in their list
+    const staffView = await getAs(`/admin/cases/${caseId}`, ctx.tokenA);
+    assert.equal(staffView.status, 200);
+    const staffBody = await staffView.json();
+    assert.equal(staffBody.status, "open");
+
+    const staffMsg = await postAs(`/admin/cases/${caseId}/messages`, { body: "Can you reproduce it?" }, ctx.tokenA);
+    assert.equal(staffMsg.status, 204);
+    const bReply = await postAs(`/cases/${caseId}/messages`, { body: "Yes, happens every time" }, ctx.tokenB);
+    assert.equal(bReply.status, 204);
+
+    const bMine = await (await getAs("/cases", ctx.tokenB)).json();
+    assert.ok(bMine.cases.some((c: any) => Number(c.id) === caseId), "owner sees their own case");
+    const aAll = await (await getAs("/cases", ctx.tokenA)).json();
+    assert.ok(!aAll.cases.some((c: any) => Number(c.id) === caseId), "other user's list must exclude B's case");
   });
 
   // cleanup

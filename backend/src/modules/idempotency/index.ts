@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { pool } from "../../db/pool.js";
 import type { PoolClient } from "pg";
 
 /**
@@ -68,4 +69,45 @@ export async function withIdempotencyKey(params: {
   if (rows.length === 0) return { replayed: false }; // raced but not committed yet; treat as fresh
   if (rows[0].request_hash !== hash) throw new IdempotencyKeyMismatchError();
   return { replayed: true };
+}
+
+/**
+ * Deletes idempotency keys older than `retentionDays`. A key only needs to
+ * outlive the client's retry window — once it is gone, a late retry simply
+ * starts a fresh transaction (the mutation ran long ago or was rolled back).
+ * Kept separate from the guard itself so the hot path costs one index lookup
+ * and nothing else.
+ */
+export async function sweepExpiredIdempotencyKeys(retentionDays: number): Promise<number> {
+  const { rowCount } = await pool.query(
+    `DELETE FROM idempotency_keys
+     WHERE created_at < now() - make_interval(days => $1)`,
+    [retentionDays]
+  );
+  return rowCount ?? 0;
+}
+
+let idempotencyRetentionHandle: ReturnType<typeof setInterval> | null = null;
+
+/** Starts a daily job that deletes idempotency keys past retention. Call once at backend startup. */
+export function startIdempotencyRetentionJob(
+  retentionDays = 7,
+  intervalMs = 24 * 60 * 60 * 1000
+) {
+  if (idempotencyRetentionHandle) return;
+  idempotencyRetentionHandle = setInterval(async () => {
+    try {
+      const count = await sweepExpiredIdempotencyKeys(retentionDays);
+      if (count > 0) console.log(`[idempotency] swept ${count} key(s) past ${retentionDays}d`);
+    } catch (err) {
+      console.error("[idempotency] retention job failed", err);
+    }
+  }, intervalMs);
+}
+
+export function stopIdempotencyRetentionJob() {
+  if (idempotencyRetentionHandle) {
+    clearInterval(idempotencyRetentionHandle);
+    idempotencyRetentionHandle = null;
+  }
 }

@@ -46,6 +46,20 @@ const EnvSchema = z.object({
   // scaling bugs). Default 1,000,000 cents = 10,000 units of the 100-cent
   // base currency.
   ECONOMY_ANOMALY_THRESHOLD_CENTS: z.coerce.number().default(1_000_000),
+  // Append-only tables that grow forever would sink a long-running server.
+  // These two jobs sweep them (run daily at startup). Retention windows in
+  // DAYS; acknowledged-only for security_events so unresolved threats are
+  // never silently dropped.
+  SECURITY_EVENT_RETENTION_DAYS: z.coerce.number().default(90),
+  IDEMPOTENCY_KEY_RETENTION_DAYS: z.coerce.number().default(7),
+  // Request throttling tiers (see middleware/rateLimit.ts). Per-window
+  // max requests keyed by client IP. Overridable so a high-traffic
+  // deployment can tune without a code change, and so the integration
+  // suite (which legitimately fires hundreds of admin calls in one
+  // window) can raise them in test env.
+  RATE_LIMIT_AUTH_MAX: z.coerce.number().default(10),
+  RATE_LIMIT_BRIDGE_MAX: z.coerce.number().default(120),
+  RATE_LIMIT_ADMIN_MAX: z.coerce.number().default(60),
 });
 
 const parsed = EnvSchema.safeParse(process.env);
