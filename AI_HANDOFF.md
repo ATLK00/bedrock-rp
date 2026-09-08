@@ -105,26 +105,26 @@
     client to the last untrusted hop (the first proxy's IP), by design. Test
     that value against the actual deployment shape before relying on it.
 
-- Live BDS → backend chain for character session resolution (evidence dated
-  2026-09-08, before the 2026-09-09 foundation round): a real client
-  (`K2SirLao`, persistent_id `AC626455D87C6AD4`) joined after linking and the
-  backend auto-filled `character_id = 3` on the new `player_sessions` row (id 5)
-  with `left_at = NULL` and advancing `last_seen_at` — join/presence/heartbeat/
-  session-rotation/leave cycles confirmed in the same table (rows 3–4 closed with
-  `left_at` set). Remaining on the round-trip: leave → rejoin-without-`!link`
-  reconnect confirmation and a re-smoke on current HEAD — see Unverified.
+- Live BDS → backend chain for character session resolution + reconnect
+  (raw `player_sessions` evidence, dated 2026-09-08, before the 2026-09-09
+  foundation round): character `K2SirLao` (persistent_id `AC626455D87C6AD4`).
+  Session 5 = join after `!link` → `character_id` auto-filled to 3, then closed
+  (`left_at` set). Session 6 = **rejoin WITHOUT `!link`** → opened with
+  `character_id = 3` again and `left_at = NULL`, heartbeat advanced
+  `last_seen_at` (~19:30) until leave, then closed (`left_at` set). This closes
+  join/presence/heartbeat/session-rotation/leave, `!link` consume, persistent-id
+binding, character-session-resolve, and leave→rejoin persistence. The only
+live item still unverified at every run is the stale-heartbeat guard +
+concurrent-join changes added in the 2026-09-09 round (not yet re-smoked on
+current HEAD), plus real Discord OAuth (below).
 
 ## Unverified (needs infrastructure we don't have in a plain dev env)
-- Live Minecraft round-trip — **mostly VERIFIED** (full evidence + raw
-  `player_sessions` output captured in the Verified block above, dated
-  2026-09-08). What the existing evidence already covers: join/presence/heartbeat/
-  session-rotation/leave, `!link` code consume, persistent-id binding, and
-  character-session-resolve (session after linking got `character_id` auto-filled).
-  Remaining on this item: (a) a final leave → rejoin-without-`!link` reconnect
-  confirmation (expect a new session id carrying the same `character_id` with
-  `left_at = NULL`), and (b) a quick re-smoke on current HEAD, since
-  `player_session` gained the stale-heartbeat guard + concurrent-join idempotency
-  in the 2026-09-09 round.
+- Live Minecraft round-trip — **VERIFIED end-to-end** (sessions 5 & 6 evidence
+  captured in Verified). Covers join/presence/heartbeat/session-rotation/leave,
+  `!link` code consume, persistent-id binding, character-session-resolve, and
+  leave→rejoin persistence (rejoin without `!link` kept `character_id = 3`).
+  Only residual: re-smoke on current HEAD, since `player_session` gained the
+  stale-heartbeat guard + concurrent-join idempotency in the 2026-09-09 round.
 - Real Discord OAuth — code exists (`GET /auth/discord/login` →
   oauth2/authorize → `/auth/discord/callback` → exchange code → upsert user →
   issue session) and is structurally covered by the HTTP-layer suite, but the
