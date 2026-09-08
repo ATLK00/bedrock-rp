@@ -114,9 +114,12 @@
   `last_seen_at` (~19:30) until leave, then closed (`left_at` set). This closes
   join/presence/heartbeat/session-rotation/leave, `!link` consume, persistent-id
 binding, character-session-resolve, and leave→rejoin persistence. The only
-live item still unverified at every run is the stale-heartbeat guard +
-concurrent-join changes added in the 2026-09-09 round (not yet re-smoked on
-current HEAD), plus real Discord OAuth (below).
+  live re-smoke still pending: the stale-heartbeat guard + concurrent-join
+  changes added in the 2026-09-09 round (the evidence above is dated
+  2026-09-08, i.e. before that round).
+- Discord OAuth: user-confirmed real sign-in completed on 2026-09-09 (browser →
+  Discord authorize → callback → session issued). Recorded from user report;
+  not independently observed in this environment.
 
 ## Unverified (needs infrastructure we don't have in a plain dev env)
 - Live Minecraft round-trip — **VERIFIED end-to-end** (sessions 5 & 6 evidence
@@ -125,11 +128,9 @@ current HEAD), plus real Discord OAuth (below).
   leave→rejoin persistence (rejoin without `!link` kept `character_id = 3`).
   Only residual: re-smoke on current HEAD, since `player_session` gained the
   stale-heartbeat guard + concurrent-join idempotency in the 2026-09-09 round.
-- Real Discord OAuth — code exists (`GET /auth/discord/login` →
-  oauth2/authorize → `/auth/discord/callback` → exchange code → upsert user →
-  issue session) and is structurally covered by the HTTP-layer suite, but the
-  actual code-exchange against Discord's API with a real app has NOT been run.
-  Do NOT mark Discord OAuth verified until a real sign-in completes.
+- Real Discord OAuth — **VERIFIED**: user-confirmed live sign-in (2026-09-09) —
+  browser → `oauth2/authorize` → callback → code exchange → session issued.
+  Details recorded in the Verified block above.
 - `trust proxy` upstream shapes: verified against a single-hop docker nginx
   (see Verified); multi-hop/load-balanced shapes still depend on the real
   deployment and the documented caveat applies.
