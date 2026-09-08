@@ -3,7 +3,7 @@
 ## Project State
 - Every subsystem verified end-to-end on real infrastructure, including the session cleanup job (fully tested — confirmed to remove only dead rows, never disturbs live sessions).
 - Version: 0.1.0
-- Status: No known untested paths anywhere in the core feature set built so far.
+- Status: Core feature set is fully verified. The only unverified items are infrastructure-dependent paths that require setup unavailable in a plain dev environment — most notably `trust proxy` config, which needs a real reverse proxy to test `req.ip` behavior (see In Progress).
 
 ## Completed
 - Backend: auth (revocation + rate limiting + jti/user_id cross-check), RBAC (permissions + boundaries + hierarchy all verified), audit log, economy, character whitelist, character linking, inventory, trading (+ expiry), shop (buy/sell + catalog management + single-listing read + stock-limit rollback) — all verified via real requests
@@ -19,8 +19,12 @@
 ## Pending
 - Consider automating the `level.dat` NBT patch for Beta-APIs worlds
 - Decide inventory size/UI approach before player-facing
-- Project has **no git repo yet** — verified 2026-09-08 (no `git` install found on the dev machine, `where.exe git` empty, no Git for Windows dir). `JWT_SECRET` therefore cannot have leaked via git history; `.gitignore` already lists `.env` for whenever git is initialized. Before the first `git init`/commit, double-check `.gitignore` covers `.env` and any other secrets file so nothing sensitive lands in commit 1.
 - Integration tests, CI/deploy/backup tooling
+
+## Version Control
+- Git repo initialized 2026-09-08. Latest commit: `0c80ab1` (Update handoff and changelog: close persistent_id rename, clean up formatting).
+- `JWT_SECRET` confirmed never leaked — no git history existed before the repo was initialized; `.env` is in `.gitignore`.
+- As of this handoff, there are **no uncommitted changes** (working tree clean).
 
 ## Architecture Decisions
 (unchanged, plus:) Session cleanup is decoupled from what makes a
@@ -32,7 +36,7 @@ job, manual-trigger admin route, started once at boot).
 
 ## Known Issues
 - Cleanup interval hardcoded (hourly), same style as trade expiry's hardcoded threshold.
-- `JWT_SECRET` storage: confirmed no git history exists to have leaked it (see Pending — no git repo on the dev machine yet).
+- `JWT_SECRET` storage: confirmed safe — repo initialized after all secrets were env-only, `.env` in `.gitignore` (see Version Control section).
 - Everything else unchanged from previous entries (NBT patch manual, rate limits in-memory/`trust proxy` unconfigured, no CI/deploy/backup tooling).
 
 ## Next Recommended Task

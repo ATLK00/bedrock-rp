@@ -19,10 +19,11 @@ import { getBridgeConfig } from "./bridgeConfig.js";
  * backend join-notify call, and the !link chat command).
  *
  * persistentId is NOT necessarily the literal Xbox Live xuid string —
- * it's an opaque stable identifier. The backend's `characters.xuid`
- * column stores this value; the column name is a holdover and doesn't
- * mean literal Xbox xuid. Don't assume this value has any external
- * meaning outside this system.
+ * it's an opaque stable identifier. The backend's `characters.persistent_id`
+ * column stores this value (renamed from the old `characters.xuid`, a
+ * holdover name that didn't mean literal Xbox xuid). Don't assume this
+ * value has any external meaning outside this system. The wire field
+ * (`xuid` in /bridge/character/link) is kept unchanged for compatibility.
  */
 const persistentIdByName = new Map();
 

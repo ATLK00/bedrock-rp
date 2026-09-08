@@ -190,8 +190,8 @@ Admin catalog management (`shop.manage` permission, `010_shop_permission.sql`):
 ## Linking a Discord character to a Bedrock account
 
 A character is created via Discord OAuth2 (one Discord account = one
-character), but the in-game xuid isn't known until the player actually
-joins with Minecraft. To connect the two:
+character), but the in-game persistentId isn't known until the player
+actually joins with Minecraft. To connect the two:
 
 1. Logged-in user calls `POST /character/link-code` (session cookie
    required) → gets back a short code like `A3F9K2`, valid 15 minutes
@@ -202,10 +202,11 @@ joins with Minecraft. To connect the two:
    cheats/commands on. `!link` is a plain chat message, so it reaches
    our `chatSend` handler regardless of the world's cheat settings.)
 3. The behavior pack intercepts that chat message (never broadcasts it),
-   calls `POST /bridge/character/link` with the code + the player's xuid
-4. Backend validates the code hasn't expired/been used, checks the xuid
-   isn't already linked to a different character, then sets
-   `characters.xuid` and clears the code — one-time use
+   calls `POST /bridge/character/link` with the code + the player's
+   persistentId
+4. Backend validates the code hasn't expired/been used, checks the
+   persistentId isn't already linked to a different character, then sets
+   `characters.persistent_id` and clears the code — one-time use
 
 **Caveat, RESOLVED**: earlier versions of this doc warned that
 `event.playerId`/`player.id` might not be the real xuid — confirmed
@@ -214,9 +215,12 @@ true. The correct identifier is `@minecraft/server-admin`'s
 what `behavior_pack/scripts/main.js` actually uses now. It is an opaque
 "stable across sessions" identifier per Mojang's docs — not necessarily
 the literal Xbox Live xuid string, but stable and unique per player,
-which is all the linking scheme needs. The `characters.xuid` column
-name is a holdover from before this was understood; it stores this
-persistentId value, not a literal Xbox xuid.
+which is all the linking scheme needs. The backend stores this
+persistentId value in the `characters.persistent_id` column (renamed
+from the old `characters.xuid`, which was a holdover name from before
+this was understood). The external wire fields (`xuid` on
+`/bridge/character/link`, `playerId` on `/bridge/player/join`) are kept
+unchanged for compatibility with the deployed behavior pack.
 
 ## Rules
 

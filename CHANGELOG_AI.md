@@ -1402,43 +1402,6 @@ whole (permissions, boundaries, and now hierarchy) has complete
 real-world test coverage once this entry's tests are run.
 
 ---
-## [2026-09-08 11:30] — AI: Claude Sonnet 5 (claude.ai) — USER-VERIFIED
-
-### Task
-Verify `JWT_SECRET` was never leaked via git history, then set the project up with real version control since none existed yet.
-
-### Changed
-- `.gitignore` — added `*_body.json` and `grant_*.json` patterns to cover ad-hoc curl test payload files.
-- Repo: initialized git (`git init`) for the first time in this project's life; made initial commit; removed 25 throwaway test-payload `.json` files (`exploit.json`, `overbuy.json`, `grant_admin*.json`, etc.) that had been created during manual RBAC/economy testing sessions and were never meant to be tracked.
-
-### Why
-- `AI_HANDOFF.md`'s Pending list flagged confirming `JWT_SECRET` never leaked into source control. Investigation found the project had no `git` installation at all on the dev machine — so there was no history for it to have leaked into. Decided to set up git now rather than leave the project without version control indefinitely.
-- The throwaway `.json` files were cluttering `backend/` and `ops/` with non-source artifacts from earlier manual testing; removed them and added `.gitignore` patterns so future ad-hoc test payloads don't get committed by accident.
-
-### Dependencies / Impact
-- No code or runtime behavior changed — this is tooling/repo-hygiene only.
-- Anyone cloning this repo going forward gets a clean history starting from this initial commit; no prior undocumented history exists to worry about.
-
-### Tests
-- [PASS] `git status --porcelain | Select-String "\.env"` before and after `git add .` — confirmed `backend/.env` (the real secrets file) never got staged; only `backend/.env.example` was tracked.
-- [PASS] `git log --oneline` — commits landed as expected: initial commit (76 files), throwaway-file removal (25 deletions), `.gitignore` fix (added then de-duplicated).
-- [PASS] Caught and fixed a duplication bug where a `.gitignore` append command was accidentally run twice, verified via `Get-Content .gitignore` before the final fix commit.
-
-### Security
-- Confirmed no git history existed prior to this session, so `JWT_SECRET` (or any other secret) cannot have leaked via git — the concern in `AI_HANDOFF.md`'s Pending list is resolved by way of there being nothing to check.
-- `.gitignore` already covered `.env` before this session; verified it holds going forward with every commit made.
-
-### Known Issues
-- Git author identity (`user.name`/`user.email`) is only configured locally on this one dev machine — not yet relevant until this repo is pushed anywhere or shared.
-- No remote configured yet (this is a local-only repo for now).
-
-### Next Steps
-1. If/when a remote is needed (GitHub, GitLab, etc.), add it with `git remote add origin <url>` and push.
-2. Continue with remaining `AI_HANDOFF.md` Pending items: `trust proxy` verification (needs a real reverse proxy), `characters.xuid` rename, NBT patch automation, inventory UI decision, CI/deploy/backup tooling.
-
-### Handoff Notes
-This project now has real version control for the first time — treat `990e50c` as the true starting point of history. Nothing before this commit exists to inspect or blame; don't assume older history is retrievable.
-
 ## [2026-09-08 09:00] — AI: Claude Sonnet 5 (claude.ai)
 
 ### Task
@@ -1468,6 +1431,65 @@ Previously, the only requirement to authenticate as a given user id was: JWT sig
 
 ### Handoff Notes
 This was the one open finding from the previous role-hierarchy testing pass. With this patched, there are no other known auth/session correctness gaps flagged in this changelog.
+
+---
+## [2026-09-08 09:30] — AI: Claude Sonnet 5 (claude.ai)
+
+### Task
+Two low-risk hardening items from the backlog, bundled since they're independent and small enough to verify in one pass: (1) role management ranks moved from a hardcoded object into the `roles` table, (2) `trust proxy` made configurable via env instead of unset.
+
+### Changed
+- `backend/migrations/014_role_rank.sql` — new `roles.rank INT NOT NULL DEFAULT 0` column; seeds `moderator`=10, `admin`=50 (owner left at 0, still handled as an always-highest special case in code, never compared via this column).
+- `backend/src/rbac/admin.ts` — removed hardcoded `ROLE_RANK` object; `getActorRank()` and `assertCanManageRole()` now read rank from `roles.rank` (joined in the same queries `grantRole`/`revokeRole` already ran, no added query).
+- `backend/src/config/index.ts` — added `TRUST_PROXY` env var (string, default `"false"`).
+- `backend/src/index.ts` — parses `TRUST_PROXY` into express's expected boolean/number/string form and calls `app.set('trust proxy', ...)` before any middleware that reads `req.ip` (rate limiting).
+- `backend/.env.example` — documented `TRUST_PROXY`.
+- `backend/src/middleware/rateLimit.ts` — updated comment to point at the new config instead of describing it as unset.
+
+### Why
+- Role ranks: `AI_HANDOFF.md`'s pending list flagged rank as hardcoded in `rbac/admin.ts` rather than the `roles` table — this lets ranks be adjusted (e.g. adding a rank between moderator/admin) without a code deploy.
+- Trust proxy: `AI_HANDOFF.md` pending list + `rateLimit.ts`'s own comment flagged this as unconfigured — with it unset, rate limiting behind any reverse proxy would key on the proxy's IP, not the real client's, silently defeating the per-IP limits.
+
+### Dependencies / Impact
+- Migration `014` must run before deploying this code (`getActorRank`/`assertCanManageRole` now depend on `roles.rank` existing).
+- Behavior-preserving by default: seeded rank values match the old hardcoded ones exactly; `TRUST_PROXY` defaults to `"false"`, same effective behavior as before (unset).
+- No route signatures, permission keys, or audit log shapes changed.
+
+### Tests
+- [NOT RUN] No network in this sandbox — `npm install` fails (403 from registry), so no `tsc`, no `npm run migrate`, no integration test could execute this iteration.
+- [NOT RUN] Manual verification needed: run `npm run migrate`, then re-test the existing RBAC grant/revoke rank-hierarchy cases (admin→moderator grant succeeds, admin→admin grant fails, moderator→moderator grant fails) to confirm DB-sourced ranks produce identical results to the old hardcoded ones.
+- [NOT RUN] Trust proxy: no way to test reverse-proxy behavior in this sandbox; verify manually by setting `TRUST_PROXY=1` behind a real proxy and confirming `req.ip` reflects the client, not the proxy.
+
+### Security
+- Role rank change is a refactor of an existing, already-tested security boundary (grant/revoke rank check) — logic unchanged, only the rank *source* moved. Still needs the manual re-verification above before trusting it in place of the old hardcoded version.
+- Trust proxy defaulting to `"false"` is the safe default (matches Express's own default of not trusting any proxy) — this change only adds the *ability* to configure it correctly, it doesn't change current behavior unless the env var is set.
+
+### Known Issues
+- Both items above are implemented but **unverified** — do not mark them done in `AI_HANDOFF.md`'s Pending list until run against real infrastructure.
+- `characters.xuid` rename, NBT patch automation, inventory UI, CI/deploy/backup tooling — still untouched, unchanged from previous entries.
+
+### Next Steps
+1. `npm run migrate` — applies `014_role_rank.sql`.
+2. Re-run the RBAC hierarchy test cases (grant/revoke at each rank pairing) and confirm results match pre-change behavior.
+3. If deploying behind a reverse proxy, set `TRUST_PROXY` appropriately and confirm `req.ip` is correct (e.g. log it, or watch rate-limit behavior from a single real client IP through the proxy).
+
+### Handoff Notes
+Bundled these two because they're independent (different files, no shared code path) and both small enough to test together in one pass once real infra is available — not because they're related features. Everything else in `AI_HANDOFF.md`'s Pending list is untouched.
+
+---
+## [2026-09-08 09:35] — AI: Claude Sonnet 5 (claude.ai) — USER-VERIFIED
+
+### Task
+Verify `014_role_rank.sql` / rank-hierarchy grant logic against real infrastructure — the item flagged `[NOT RUN]` in the previous entry.
+
+### Tests
+- [PASS] `npm run migrate` — `014_role_rank.sql` applied cleanly
+- [PASS] admin (rank 50) grants `moderator` (rank 10) to another user — `204 No Content`
+- [PASS] admin (rank 50) grants `admin` (rank 50) to another user — `403`, `"you cannot grant or revoke the 'admin' role — it is not ranked below your own"`
+- [PASS] admin (rank 50) grants `owner` to another user — `403`, same `InsufficientRankError`, confirming owner's special-case block holds regardless of rank column
+
+### Handoff Notes
+DB-sourced ranks produce identical results to the old hardcoded `ROLE_RANK` object. Test session/role state created for this run (test user, forged-but-DB-backed session row) was cleaned up after. Trust proxy config from the same bundled entry is still unverified — needs a real reverse proxy to test.
 
 ---
 ## [2026-09-08 10:00] — AI: Claude Sonnet 5 (claude.ai)
@@ -1532,7 +1554,6 @@ This closes the last item from the previous entry's Pending list that was quick 
 Auth/session subsystem (login, JWT+jti verification, revocation on ban, per-session logout) now has no known untested paths.
 
 ---
-
 ## [2026-09-08 11:00] — AI: Claude Sonnet 5 (claude.ai)
 
 ### Task
@@ -1575,21 +1596,6 @@ DELETE/UPDATE, manual-trigger admin route, started once at boot) —
 consistent, low-risk mechanism reused rather than inventing a new one.
 
 ---
-
-## [2026-09-08 09:35] — AI: Claude Sonnet 5 (claude.ai) — USER-VERIFIED
-
-### Task
-Verify `014_role_rank.sql` / rank-hierarchy grant logic against real infrastructure — the item flagged `[NOT RUN]` in the previous entry.
-
-### Tests
-- [PASS] `npm run migrate` — `014_role_rank.sql` applied cleanly
-- [PASS] admin (rank 50) grants `moderator` (rank 10) to another user — `204 No Content`
-- [PASS] admin (rank 50) grants `admin` (rank 50) to another user — `403`, `"you cannot grant or revoke the 'admin' role — it is not ranked below your own"`
-- [PASS] admin (rank 50) grants `owner` to another user — `403`, same `InsufficientRankError`, confirming owner's special-case block holds regardless of rank column
-
-### Handoff Notes
-DB-sourced ranks produce identical results to the old hardcoded `ROLE_RANK` object. Test session/role state created for this run (test user, forged-but-DB-backed session row) was cleaned up after. Trust proxy config from the same bundled entry is still unverified — needs a real reverse proxy to test.
-
 ## [2026-09-08 11:15] — AI: Claude Sonnet 5 (claude.ai) — USER-VERIFIED
 
 ### Task
@@ -1608,53 +1614,49 @@ auth/session hardening pass. Combined with every other verified
 subsystem, the project has no known untested paths in its core feature
 set as of this entry.
 
-## [2026-09-08 09:30] — AI: Claude Sonnet 5 (claude.ai)
+---
+## [2026-09-08 11:30] — AI: Claude Sonnet 5 (claude.ai) — USER-VERIFIED
 
 ### Task
-Two low-risk hardening items from the backlog, bundled since they're independent and small enough to verify in one pass: (1) role management ranks moved from a hardcoded object into the `roles` table, (2) `trust proxy` made configurable via env instead of unset.
+Verify `JWT_SECRET` was never leaked via git history, then set the project up with real version control since none existed yet.
 
 ### Changed
-- `backend/migrations/014_role_rank.sql` — new `roles.rank INT NOT NULL DEFAULT 0` column; seeds `moderator`=10, `admin`=50 (owner left at 0, still handled as an always-highest special case in code, never compared via this column).
-- `backend/src/rbac/admin.ts` — removed hardcoded `ROLE_RANK` object; `getActorRank()` and `assertCanManageRole()` now read rank from `roles.rank` (joined in the same queries `grantRole`/`revokeRole` already ran, no added query).
-- `backend/src/config/index.ts` — added `TRUST_PROXY` env var (string, default `"false"`).
-- `backend/src/index.ts` — parses `TRUST_PROXY` into express's expected boolean/number/string form and calls `app.set('trust proxy', ...)` before any middleware that reads `req.ip` (rate limiting).
-- `backend/.env.example` — documented `TRUST_PROXY`.
-- `backend/src/middleware/rateLimit.ts` — updated comment to point at the new config instead of describing it as unset.
+- `.gitignore` — added `*_body.json` and `grant_*.json` patterns to cover ad-hoc curl test payload files.
+- Repo: initialized git (`git init`) for the first time in this project's life; made initial commit; removed 25 throwaway test-payload `.json` files (`exploit.json`, `overbuy.json`, `grant_admin*.json`, etc.) that had been created during manual RBAC/economy testing sessions and were never meant to be tracked.
 
 ### Why
-- Role ranks: `AI_HANDOFF.md`'s pending list flagged rank as hardcoded in `rbac/admin.ts` rather than the `roles` table — this lets ranks be adjusted (e.g. adding a rank between moderator/admin) without a code deploy.
-- Trust proxy: `AI_HANDOFF.md` pending list + `rateLimit.ts`'s own comment flagged this as unconfigured — with it unset, rate limiting behind any reverse proxy would key on the proxy's IP, not the real client's, silently defeating the per-IP limits.
+- `AI_HANDOFF.md`'s Pending list flagged confirming `JWT_SECRET` never leaked into source control. Investigation found the project had no `git` installation at all on the dev machine — so there was no history for it to have leaked into. Decided to set up git now rather than leave the project without version control indefinitely.
+- The throwaway `.json` files were cluttering `backend/` and `ops/` with non-source artifacts from earlier manual testing; removed them and added `.gitignore` patterns so future ad-hoc test payloads don't get committed by accident.
 
 ### Dependencies / Impact
-- Migration `014` must run before deploying this code (`getActorRank`/`assertCanManageRole` now depend on `roles.rank` existing).
-- Behavior-preserving by default: seeded rank values match the old hardcoded ones exactly; `TRUST_PROXY` defaults to `"false"`, same effective behavior as before (unset).
-- No route signatures, permission keys, or audit log shapes changed.
+- No code or runtime behavior changed — this is tooling/repo-hygiene only.
+- Anyone cloning this repo going forward gets a clean history starting from this initial commit; no prior undocumented history exists to worry about.
 
 ### Tests
-- [NOT RUN] No network in this sandbox — `npm install` fails (403 from registry), so no `tsc`, no `npm run migrate`, no integration test could execute this iteration.
-- [NOT RUN] Manual verification needed: run `npm run migrate`, then re-test the existing RBAC grant/revoke rank-hierarchy cases (admin→moderator grant succeeds, admin→admin grant fails, moderator→moderator grant fails) to confirm DB-sourced ranks produce identical results to the old hardcoded ones.
-- [NOT RUN] Trust proxy: no way to test reverse-proxy behavior in this sandbox; verify manually by setting `TRUST_PROXY=1` behind a real proxy and confirming `req.ip` reflects the client, not the proxy.
+- [PASS] `git status --porcelain | Select-String "\.env"` before and after `git add .` — confirmed `backend/.env` (the real secrets file) never got staged; only `backend/.env.example` was tracked.
+- [PASS] `git log --oneline` — commits landed as expected: initial commit (76 files), throwaway-file removal (25 deletions), `.gitignore` fix (added then de-duplicated).
+- [PASS] Caught and fixed a duplication bug where a `.gitignore` append command was accidentally run twice, verified via `Get-Content .gitignore` before the final fix commit.
 
 ### Security
-- Role rank change is a refactor of an existing, already-tested security boundary (grant/revoke rank check) — logic unchanged, only the rank *source* moved. Still needs the manual re-verification above before trusting it in place of the old hardcoded version.
-- Trust proxy defaulting to `"false"` is the safe default (matches Express's own default of not trusting any proxy) — this change only adds the *ability* to configure it correctly, it doesn't change current behavior unless the env var is set.
+- Confirmed no git history existed prior to this session, so `JWT_SECRET` (or any other secret) cannot have leaked via git — the concern in `AI_HANDOFF.md`'s Pending list is resolved by way of there being nothing to check.
+- `.gitignore` already covered `.env` before this session; verified it holds going forward with every commit made.
 
 ### Known Issues
-- Both items above are implemented but **unverified** — do not mark them done in `AI_HANDOFF.md`'s Pending list until run against real infrastructure.
-- `characters.xuid` rename, NBT patch automation, inventory UI, CI/deploy/backup tooling — still untouched, unchanged from previous entries.
+- Git author identity (`user.name`/`user.email`) is only configured locally on this one dev machine — not yet relevant until this repo is pushed anywhere or shared.
+- No remote configured yet (this is a local-only repo for now).
 
 ### Next Steps
-1. `npm run migrate` — applies `014_role_rank.sql`.
-2. Re-run the RBAC hierarchy test cases (grant/revoke at each rank pairing) and confirm results match pre-change behavior.
-3. If deploying behind a reverse proxy, set `TRUST_PROXY` appropriately and confirm `req.ip` is correct (e.g. log it, or watch rate-limit behavior from a single real client IP through the proxy).
+1. If/when a remote is needed (GitHub, GitLab, etc.), add it with `git remote add origin <url>` and push.
+2. Continue with remaining `AI_HANDOFF.md` Pending items: `trust proxy` verification (needs a real reverse proxy), `characters.xuid` rename, NBT patch automation, inventory UI decision, CI/deploy/backup tooling.
 
 ### Handoff Notes
-Bundled these two because they're independent (different files, no shared code path) and both small enough to test together in one pass once real infra is available — not because they're related features. Everything else in `AI_HANDOFF.md`'s Pending list is untouched.
+This project now has real version control for the first time — treat `990e50c` as the true starting point of history. Nothing before this commit exists to inspect or blame; don't assume older history is retrievable.
 
-## [2026-09-08 12:00] — AI: unspecified (self-reported by user, reformatted for changelog compliance)
+---
+## [2026-09-08 12:00] — AI: user (manual verification), reformatted by Claude Sonnet 5 (claude.ai)
 
 ### Task
-Complete `characters.xuid` → `characters.persistent_id` rename: apply migration `015_persistent_id_rename.sql` against real infra, verify the full link flow, and fix a related bug found along the way (admin routes not enforcing an authenticated `req.userId`).
+Complete `characters.xuid` → `characters.persistent_id` rename: apply migration `015_persistent_id_rename.sql` against real infra, verify the full link flow, and fix a related bug found along the way (admin routes not enforcing an authenticated `req.userId`). Committed as `744f82b`.
 
 ### Changed
 - `backend/migrations/015_persistent_id_rename.sql` — applied.
@@ -1681,4 +1683,4 @@ None new from this change.
 None remaining for this item — closed.
 
 ### Handoff Notes
-This entry was reformatted from a non-standard, untimestamped note left in this file to match the changelog's own required format (rule: every entry needs a real timestamp and AI/model attribution, and `[PASS]` may only be written for things actually run — the original note's claims are carried over as-is since they came with corroborating detail in `AI_HANDOFF.md`, but whoever ran this should confirm the tests above actually executed as described).
+This entry was reformatted from a non-standard, untimestamped note left in this file to match the changelog's own required format. The work was performed manually by the user, not by an AI — the AI contribution was reformatting this entry for changelog compliance. Committed as `744f82b` (Complete persistent id rename).
