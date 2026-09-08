@@ -2,13 +2,6 @@ node_modules/
 dist/
 .env
 *.log
-
 # ad-hoc curl test payloads (throwaway, not fixtures)
 *_body.json
 grant_*.json
-
-
-# ad-hoc curl test payloads (throwaway, not fixtures)
-*_body.json
-grant_*.json
-
