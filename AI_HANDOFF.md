@@ -22,7 +22,7 @@
 - Integration tests, CI/deploy/backup tooling
 
 ## Version Control
-- Git repo initialized 2026-09-08. Latest commit: `3af1ccc` (Fix persistent_id references in docs, reorder changelog, clarify handoff status).
+- Git repo initialized 2026-09-08. Latest commit (as of this handoff): `ad09e13` (Pin latest commit hash in handoff version control section).
 - The 015 `persistent_id` rename work is committed as `744f82b` (Complete persistent id rename).
 - `JWT_SECRET` confirmed never leaked — no git history existed before the repo was initialized; `.env` is in `.gitignore`.
 - As of this handoff, there are **no uncommitted changes** (working tree clean).
