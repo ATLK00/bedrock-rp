@@ -51,6 +51,137 @@
 
 ---
 
+## [2026-09-08 23:35] — AI: big-pickle (opencode)
+
+### Task
+Execute the 8-item autonomous roadmap the user ordered (no further questions):
+Character System (create/get/delete), Player Session/Online presence, Inventory
+metadata, Economy wallet+deduct, Admin/RBAC read routes, Bridge hardening (HMAC
+replay protection), DB integrity pass, automated integration tests. Community
+the "trust proxy" item stays unverified (needs a real reverse proxy).
+
+### Changed
+- `backend/migrations/016_player_sessions.sql` — NEW: `player_sessions` history
+  table + partial unique index `uq_player_sessions_one_active` (one open
+  window per persistent_id) + timeline CHECK constraint.
+- `backend/migrations/017_db_integrity.sql` — NEW: index/constraint hardening
+  (`idx_transactions_character_created`, `idx_audit_log_target`,
+  `idx_characters_whitelisted_active`, `idx_sessions_user_active`,
+  `idx_inventory_slots_item`, `chk_inventory_slots_consistency`,
+  `idx_trades_status_created`). Applied to dev DB (verified).
+- `backend/src/config/index.ts` — NEW env: `PRESENCE_TTL_SECONDS` (90),
+  `BRIDGE_SIG_DRIFT_SECONDS` (300), `BRIDGE_NONCE_TTL_SECONDS` (600), all
+  defaulted; existing `.env` still works.
+- `backend/src/app.ts` — NEW: side-effect-free `createApp()`, `/bridge`
+  shared-secret middleware + optional signature verification, global error
+  handler; `index.ts` is now boot only.
+- `backend/src/middleware/logging.ts` — NEW: request logger + `requestId`/
+  `rawBody` capture on `req`.
+- `backend/src/modules/player_session/index.ts` — NEW: registerPlayerJoin /
+  heartbeat / playerLeft / listOnlinePlayers; Redis presence (best-effort) +
+  Postgres session history (record of record); reconnect closes the previous
+  open window.
+- `backend/src/modules/bridge/signature.ts` — NEW: HMAC-SHA256 over
+  `${ts}\n${nonce}\n${rawBody}`; drift window + Redis SET NX nonce replay
+  rejection; legacy shared-secret-only clients still accepted.
+- `backend/src/modules/bridge/index.ts` — added `/player/join|leave|heartbeat`
+  with inline validation; `/character/link` validation + clearer errors.
+- Character: CSPRNG link codes (`randomInt`), `getOwnCharacter`,
+  `softDeleteCharacter` (clears link, keeps history), routes
+  `GET/POST/DELETE /character`, `GET /character/wallet`, `GET
+  /character/inventory`; `POST /character/link-code` kept.
+- Economy: `getWalletAndHistory`, `deduct` (FOR UPDATE + anti-negative + ledger
+  + audit), admin `POST /admin/economy/deduct` (409 on insufficient funds).
+- Inventory: `giveItem` accepts `meta` + `canonicalMeta()` — stacks merge only
+  when metadata deep-equals; admin `/inventory/give` now forwards `meta`.
+- Trade: receiver stacking only into metadata-empty slots; `expireOldTrades`
+  parameterized (`$1::interval`).
+- RBAC/Admin: `listRolesWithPermissions`, `GET /admin/roles`,
+  `GET /admin/users/:id/roles` (`rbac.manage_roles`), `GET
+  /admin/presence/online` (`auth.manage`).
+- `behavior_pack/scripts/crypto_hmac.js` — NEW: pure-JS SHA-256 + HMAC-SHA256
+  (Script API has no crypto import). Bug fixed during vector testing: length
+  field of the final SHA-256 padding block was written byte-swapped, and keys
+  >64 bytes weren't zero-padded to block size.
+- `behavior_pack/scripts/main.js` — every bridge call now signed
+  (`x-bds-ts`/`x-bds-nonce`/`x-bds-sig`), join + `playerLeave` notify + 30s
+  heartbeat, `!link` command, timeout/error handling preserved.
+- `backend/src/db/migrate.ts` — refactored so the migration runner is
+  exportable (`runMigrations(pool)`) for tests; CLI behavior unchanged.
+- `backend/src/test/integration.test.ts` — NEW harness: throws-down a fresh
+  `bedrock_rp_test` DB, migrates 001–017, boots `createApp().listen(0)`, runs
+  HTTP-level suites. `package.json` test script now `node --test
+  dist/**/*.test.js` (Node 24 rejects a bare directory arg for `--test` on
+  this platform; the `**/*.test.js` glob is expanded by Node itself).
+
+### Why
+The 8-roadmap items were the user's stated next milestone; commit-per-milestone
+planning aside, this batch shipped in one pass because auth/presence/bridge/tests
+are interdependent. The integration suite exists to catch exactly the class of
+bug I hit: DB-backed auth values that were silently self-inconsistent, and a
+signature-failure path that mis-reported as 500.
+
+### Real bugs this suite found and I fixed
+1. `issueSessionToken` signed `sub` with the DB's raw BIGINT id (string from
+   node-pg) while `verifySessionToken` requires a numeric `sub` — every session
+   issued from a DB-fetched user id failed verification on the next request
+   (silent login loop). Now normalizes to a number and validates.
+2. Admin `POST /admin/inventory/give` silently dropped the `meta` field, so
+   meta-distinct items merged into one stack. Now validated + forwarded.
+3. `BridgeSignatureError` (subclass of `Error`) reported `name === "Error"` in
+   V8, so the `/bridge` middleware's `name ===` check fell through to the 500
+   handler instead of 401. Class now sets `this.name`, middleware uses
+   `instanceof`.
+
+### Dependencies / Impact
+- Two new migrations — applied to the dev DB and idempotently tracked in
+  `_migrations`.
+- Three new env keys are optional (defaulted) — no break for existing `.env`.
+- Behavior pack must be redeployed for signed requests + heartbeat (pack now
+  sends sig headers; backend accepts both old and new).
+
+### Tests
+- [PASS] `npm run build` (tsc) — exit 0.
+- [PASS] `crypto_hmac.js` vectors: RFC 4231 ASCII vectors + node:crypto
+  cross-checks (multi-block, emoji, key<64, key==64, key>64).
+- [PASS] `npm run migrate` on dev DB (applied 016, 017).
+- [PASS] `npm test` — integration suite 11/11 (auth/session, character CRUD +
+  validation, bridge secret/signature/replay/staleness, link lifecycle +
+  conflict, presence/session dedup via signed calls, RBAC anon/forbidden/owner,
+  economy grant/wallet/deduct/transfer/insufficient, inventory meta
+  stacking/remove/full, soft delete) against docker Postgres+Redis.
+- [NOT RUN] Live Minecraft-client heartbeat/leave round-trip — needs a running
+  dedicated server with the updated pack.
+- [NOT RUN] Discord OAuth exchange — needs a real Discord app (unchanged from
+  earlier entries).
+
+### Security
+- Bridge calls now carry HMAC-SHA256 replay protection; captured requests are
+  rejected outside a 300s drift window and never twice (nonce TTL 600s).
+  Radius of trust unchanged: shared secret still required.
+
+### Known Issues
+- Redis presence is best-effort by design (Redis down ⇒ "no one online",
+  DB history still recorded).
+- `JWT_SECRET`/`BDS_BRIDGE_SECRET` still static-secret based; a deploy pipeline
+  rotating them is future work.
+- Node 24 `node --test <directory>` fails with a `Cannot find module` on this
+  setup — use the `dist/**/*.test.js` glob form (npm script already does).
+
+### Next Steps
+- Deploy updated behavior pack to a live server; verify heartbeat/leave against
+  real joins.
+- `trust proxy` verification with a real reverse proxy remains the only
+  unverified infra-path item.
+
+### Handoff Notes
+All new work is uncommitted as of this entry; handoff anchor policy unchanged
+(frozen `ab026f7`). Historical CHANGELOG entries predating this entry still
+describe the old pending-state of these features — those are snapshots, not
+current truth.
+
+---
+
 ## [2026-09-06 00:00] — AI: Claude Sonnet 5 (claude.ai)
 
 ### Task

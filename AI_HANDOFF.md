@@ -15,6 +15,25 @@
   in-game `!link` flow end-to-end on a real client), inventory, trading
   (+ anti-scam rollback, + expiry job), shop (buy/sell + catalog management +
   single-listing read + stock-limit rollback) — all verified via real requests.
+- Character lifecycle: `GET/POST/DELETE /character`, soft-delete keeps
+  wallet/ledger history and clears the link; CSPRNG link codes.
+- Player presence/session history: `POST /bridge/player/join|leave|heartbeat`
+  (Redis presence TTL + Postgres `player_sessions` with a partial-unique "one
+  open window" backstop; reconnect dedup verified in tests).
+- Automated integration test suite (`backend/src/test/integration.test.ts`) —
+  fresh `bedrock_rp_test` DB each run, migrations 001–017 applied, HTTP-level
+  coverage of auth/session, character, link, presence, RBAC, economy,
+  inventory(meta), bridge auth. `npm test` = 11/11 (verified 2026-09-08).
+- Bridge hardening: HMAC-SHA256 request signing (drift window + Redis nonce
+  replay rejection); legacy shared-secret-only clients still accepted. BDS pack
+  signs every call via pure-JS `crypto_hmac.js` (RFC 4231 ASCII vectors +
+  node:crypto cross-checks).
+- DB integrity pass (migration 017): hot-path indexes + slot consistency CHECK.
+- Bugs found by the new suite and fixed: (1) `issueSessionToken` signed BIGINT
+  ids as strings → every DB-derived session failed verification; (2) admin
+  `/inventory/give` dropped `meta`; (3) `BridgeSignatureError.name` defaulted to
+  "Error" → signature failures returned 500 instead of 401. Admin `/economy/
+  deduct`, `/roles`, `/users/:id/roles`, `/presence/online` routes live.
 - BDS + Script API + HTTP bridge — verified with real client joins.
 - Session/jti security fix: `verifySessionToken()` cross-checks
   `session.user_id === payload.sub`, closing an impersonation path that existed
@@ -39,7 +58,9 @@
 ## Pending (features/tooling not built yet — not blocked items)
 - Automate the `level.dat` NBT patch for Beta-APIs worlds (currently manual, see README).
 - Decide inventory size/UI approach before player-facing.
-- Integration tests (automated), CI/deploy/backup tooling.
+- CI/deploy/backup tooling (rake the `npm test` + `npm run build` gates into CI).
+- Deploy the updated behavior pack to a live server and verify the
+  heartbeat/leave + signed-call round-trip against real client joins.
 
 > Note: the `characters.xuid` rename is DONE (migration 015) — do not treat it
 > as pending. Historical CHANGELOG entries that mention it as pending are
@@ -68,6 +89,12 @@ unusable, purely for table hygiene. Mirrors the trade-expiry job's exact pattern
 
 ## Known Issues
 - Cleanup interval hardcoded (hourly), same style as trade expiry's hardcoded threshold.
+- Node 24's `node --test <directory>` reports `Cannot find module` for a bare
+  directory on this setup — use the `dist/**/*.test.js` glob form
+  (self-expanded by Node), which is what `npm test` already does.
+- `PRESENCE_TTL_SECONDS` (90s default) must stay a few seconds above the BDS
+  pack's heartbeat interval (~30s) or healthy players get dropped from
+  "online" prematurely; both are config, keep them in sync.
 - `JWT_SECRET` storage: confirmed safe — repo initialized after all secrets were
   env-only, `.env` in `.gitignore` (see Version Control).
 - Committed source files carry cosmetic UTF-8 encoding artifacts (BOM on some
@@ -77,10 +104,12 @@ unusable, purely for table hygiene. Mirrors the trade-expiry job's exact pattern
   in-memory/`trust proxy` unconfigured, no CI/deploy/backup tooling).
 
 ## Next Recommended Task
-Core feature set is verified; the one explicitly-unverified item is `trust proxy`
-(needs a real reverse proxy). Recommended next order: Trust proxy verification →
-automated integration tests → NBT patch automation → inventory UI → RP
-gameplay/features → CI/deploy/backup. Ask the user which to prioritize.
+Automated integration tests are now in place (11/11 on the real docker stack)
+and the BDS pack is signed+heartbeat-capable. Remaining verified-gaps: deploy
+the pack to a live server and confirm the heartbeat/leave round-trip, then
+`trust proxy` verification behind a real reverse proxy (still the only
+infra-dependent item without a test). After that: CI gate on `npm run build` +
+`npm test`, NBT patch automation, inventory UI.
 
 ## Do Not Change
 - One Discord account = one character

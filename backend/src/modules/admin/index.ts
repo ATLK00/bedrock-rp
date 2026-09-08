@@ -7,6 +7,7 @@ import * as rbacAdmin from "../../rbac/admin.js";
 import * as users from "../users/index.js";
 import * as shop from "../shop/index.js";
 import * as trade from "../trade/index.js";
+import * as playerSession from "../player_session/index.js";
 import { cleanupOldSessions } from "../auth/index.js";
 
 /**
@@ -37,6 +38,25 @@ adminRouter.post("/economy/grant", requirePermission("economy.grant"), async (re
   }
 });
 
+/**
+ * Claw money back from a character (anti-negative enforced inside
+ * economy.deduct). Gated on the same permission as grant — minting and
+ * clawback are two sides of one economy superpower.
+ */
+adminRouter.post("/economy/deduct", requirePermission("economy.grant"), async (req, res) => {
+  const { characterId, amountCents, reason } = req.body ?? {};
+  if (typeof characterId !== "number" || typeof amountCents !== "number" || !reason) {
+    return res.status(400).json({ error: "characterId (number), amountCents (number), reason are required" });
+  }
+  try {
+    await economy.deduct({ characterId, amountCents, reason, actorUserId: req.userId! });
+    res.status(204).end();
+  } catch (err: any) {
+    if (err instanceof economy.InsufficientFundsError) return res.status(409).json({ error: err.message });
+    res.status(500).json({ error: err.message });
+  }
+});
+
 adminRouter.post("/character/whitelist", requirePermission("character.whitelist"), async (req, res) => {
   const { characterId, whitelisted } = req.body ?? {};
   if (typeof characterId !== "number" || typeof whitelisted !== "boolean") {
@@ -47,12 +67,21 @@ adminRouter.post("/character/whitelist", requirePermission("character.whitelist"
 });
 
 adminRouter.post("/inventory/give", requirePermission("inventory.give"), async (req, res) => {
-  const { characterId, itemId, quantity } = req.body ?? {};
+  const { characterId, itemId, quantity, meta } = req.body ?? {};
   if (typeof characterId !== "number" || !itemId || typeof quantity !== "number") {
     return res.status(400).json({ error: "characterId (number), itemId (string), quantity (number) are required" });
   }
+  if (meta !== undefined && (typeof meta !== "object" || meta === null || Array.isArray(meta))) {
+    return res.status(400).json({ error: "meta (optional) must be an object" });
+  }
   try {
-    await inventory.giveItem({ characterId, itemId, quantity, actorUserId: req.userId! });
+    await inventory.giveItem({
+      characterId,
+      itemId,
+      quantity,
+      actorUserId: req.userId!,
+      ...(meta !== undefined ? { meta: meta as Record<string, unknown> } : {}),
+    });
     res.status(204).end();
   } catch (err: any) {
     if (err instanceof inventory.ItemNotFoundError) return res.status(404).json({ error: err.message });
@@ -111,6 +140,32 @@ adminRouter.post("/roles/revoke", requirePermission("rbac.manage_roles"), async 
     if (err instanceof rbacAdmin.InsufficientRankError) return res.status(403).json({ error: err.message });
     res.status(500).json({ error: err.message });
   }
+});
+
+/** Read-only: the full role/permission matrix — what each role can do. */
+adminRouter.get("/roles", requirePermission("rbac.manage_roles"), async (_req, res) => {
+  const roles = await rbacAdmin.listRolesWithPermissions();
+  res.json({ roles });
+});
+
+/** Read-only: which roles a specific user holds. */
+adminRouter.get("/users/:id/roles", requirePermission("rbac.manage_roles"), async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) {
+    return res.status(400).json({ error: "user id must be a positive integer" });
+  }
+  const roles = await rbacAdmin.listRoles(id);
+  res.json({ userId: id, roles });
+});
+
+/**
+ * Read-only: players currently online (Redis presence). Useful for an
+ * admin dashboard or a "who's on" widget — gated on auth.manage since it
+ * exposes live player identity.
+ */
+adminRouter.get("/presence/online", requirePermission("auth.manage"), async (_req, res) => {
+  const online = await playerSession.listOnlinePlayers();
+  res.json({ online });
 });
 
 /**

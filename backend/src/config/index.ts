@@ -22,6 +22,19 @@ const EnvSchema = z.object({
   DISCORD_CLIENT_SECRET: z.string().optional(),
   DISCORD_REDIRECT_URI: z.string().optional(),
   JWT_SECRET: z.string().min(32, "JWT_SECRET must be at least 32 chars"),
+  // Player presence: how long a Redis "online" key stays valid without a
+  // heartbeat. Should be a few seconds more than the behavior pack's
+  // heartbeat interval (see behavior_pack/scripts/main.js) so a dropped
+  // connection and a slow heartbeat are distinguishable from "online".
+  PRESENCE_TTL_SECONDS: z.coerce.number().default(90),
+  // Bridge signature replay protection window: |now - x-bds-ts| larger
+  // than this is rejected as a stale/attacker-replayed request (only
+  // enforced when the behavior pack sends x-bds-ts/nonce/sig headers;
+  // a legacy client that sends only the shared secret still works).
+  BRIDGE_SIG_DRIFT_SECONDS: z.coerce.number().default(300),
+  // How long a seen x-bds-nonce is remembered (Redis SET NX EX) to
+  // reject exact replays of a captured request.
+  BRIDGE_NONCE_TTL_SECONDS: z.coerce.number().default(600),
 });
 
 const parsed = EnvSchema.safeParse(process.env);

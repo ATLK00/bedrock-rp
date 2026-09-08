@@ -1,4 +1,5 @@
-import { withTransaction } from "../../db/pool.js";
+import { randomInt } from "node:crypto";
+import { withTransaction, pool } from "../../db/pool.js";
 import { writeAudit } from "../../audit/index.js";
 import { publish } from "../../eventbus/index.js";
 
@@ -58,7 +59,7 @@ const LINK_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // no 0/O/1/I, av
 function generateLinkCode(): string {
   let code = "";
   for (let i = 0; i < 6; i++) {
-    code += LINK_CODE_ALPHABET[Math.floor(Math.random() * LINK_CODE_ALPHABET.length)];
+    code += LINK_CODE_ALPHABET[randomInt(LINK_CODE_ALPHABET.length)];
   }
   return code;
 }
@@ -92,6 +93,62 @@ export class InvalidLinkCodeError extends Error {
   constructor() {
     super("link code is invalid or expired");
   }
+}
+
+/** The user's own (non-deleted) character, with link/presence summary. Null if none. */
+export async function getOwnCharacter(userId: number) {
+  const { rows } = await pool.query(
+    `SELECT id, name, whitelisted, persistent_id, created_at, last_seen_at
+     FROM characters
+     WHERE user_id = $1 AND is_deleted = false`,
+    [userId]
+  );
+  if (rows.length === 0) return null;
+  const row = rows[0];
+  return {
+    id: row.id,
+    name: row.name,
+    whitelisted: row.whitelisted,
+    linked: row.persistent_id !== null,
+    createdAt: row.created_at,
+    lastSeenAt: row.last_seen_at,
+  };
+}
+
+export class NoCharacterFoundError extends Error {
+  constructor() {
+    super("no character found for this user");
+  }
+}
+
+/**
+ * Soft-delete the user's own character. Keeps the row (audit/wallet
+ * history stay intact), clears the link so the same Bedrock account can
+ * later link to a new character, and invalidates any outstanding link
+ * code. Returns nothing; throws NoCharacterFoundError if the user has
+ * no live character.
+ */
+export async function softDeleteCharacter(userId: number) {
+  await withTransaction(async (client) => {
+    const { rows } = await client.query(
+      `UPDATE characters
+       SET is_deleted = true, persistent_id = NULL, link_code = NULL, link_code_expires_at = NULL
+       WHERE user_id = $1 AND is_deleted = false
+       RETURNING id`,
+      [userId]
+    );
+    if (rows.length === 0) throw new NoCharacterFoundError();
+    await writeAudit(
+      {
+        actorUserId: userId,
+        action: "character.delete",
+        targetType: "character",
+        targetId: String(rows[0].id),
+        result: "success",
+      },
+      client
+    );
+  });
 }
 export class PersistentIdAlreadyLinkedError extends Error {
   constructor() {

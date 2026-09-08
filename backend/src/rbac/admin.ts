@@ -99,3 +99,27 @@ export async function listRoles(userId: number): Promise<string[]> {
   );
   return rows.map((r) => r.name);
 }
+
+export interface RoleWithPermissions {
+  name: string;
+  rank: number;
+  permissions: string[];
+}
+
+/** Every role with its rank and effective permission keys — read-only admin view. */
+export async function listRolesWithPermissions(): Promise<RoleWithPermissions[]> {
+  const { rows } = await pool.query<{ name: string; rank: number; permissions: string[] }>(
+    `SELECT r.name, r.rank,
+            COALESCE(array_agg(p.key) FILTER (WHERE p.key IS NOT NULL), '{}') AS permissions
+     FROM roles r
+     LEFT JOIN role_permissions rp ON rp.role_id = r.id
+     LEFT JOIN permissions p ON p.id = rp.permission_id
+     GROUP BY r.id, r.name, r.rank
+     ORDER BY r.rank DESC, r.name`
+  );
+  return rows.map((r) => ({
+    name: r.name,
+    rank: r.rank,
+    permissions: r.permissions,
+  }));
+}

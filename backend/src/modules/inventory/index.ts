@@ -19,6 +19,16 @@ export class InsufficientItemsError extends Error {
 
 const DEFAULT_INVENTORY_SIZE = 36; // matches Bedrock's player inventory size; adjust if the RP uses a different container size
 
+/** Sorted-key JSON so two semantically-equal metadata objects compare equal. */
+function canonicalMeta(meta: unknown): string {
+  if (meta === null || meta === undefined) meta = {};
+  if (typeof meta !== "object") return String(meta);
+  const keys = Object.keys(meta as Record<string, unknown>).sort();
+  const out: Record<string, unknown> = {};
+  for (const k of keys) out[k] = (meta as Record<string, unknown>)[k];
+  return JSON.stringify(out);
+}
+
 /**
  * Give `quantity` of `itemId` to a character. Server-authoritative: this
  * is the only path that should ever increase a character's item count.
@@ -33,8 +43,10 @@ export async function giveItem(params: {
   quantity: number;
   actorUserId: number;
   inventorySize?: number;
+  meta?: Record<string, unknown>;
 }): Promise<void> {
   const { characterId, itemId, actorUserId } = params;
+  const meta = params.meta ?? {};
   let remaining = params.quantity;
   const inventorySize = params.inventorySize ?? DEFAULT_INVENTORY_SIZE;
   if (remaining <= 0) throw new Error("quantity must be positive");
@@ -51,26 +63,30 @@ export async function giveItem(params: {
     // Lock this character's existing slots for the duration of the transaction
     // to prevent a concurrent give/remove from racing on the same slots.
     const { rows: slotRows } = await client.query(
-      `SELECT slot_index, item_id, quantity FROM inventory_slots
+      `SELECT slot_index, item_id, quantity, item_metadata FROM inventory_slots
        WHERE character_id = $1 ORDER BY slot_index FOR UPDATE`,
       [characterId]
     );
     const occupiedIndexes = new Set(slotRows.map((r) => r.slot_index));
 
-    // First pass: top up existing stacks of the same item.
-    if (item.stackable) {
-      for (const slot of slotRows) {
-        if (remaining <= 0) break;
-        if (slot.item_id !== itemId) continue;
-        const space = maxStack - slot.quantity;
-        if (space <= 0) continue;
-        const add = Math.min(space, remaining);
-        await client.query(
-          `UPDATE inventory_slots SET quantity = quantity + $1 WHERE character_id = $2 AND slot_index = $3`,
-          [add, characterId, slot.slot_index]
-        );
-        remaining -= add;
-      }
+    // Canonical form for metadata comparison: two stacks merge only when
+    // their item_metadata is deep-equal (e.g. same durability). JSON
+    // stringify key order is normalized via a sorted serialization.
+    const metaKey = canonicalMeta(meta);
+
+    // First pass: top up existing stacks of the same item AND the same metadata.
+    for (const slot of slotRows) {
+      if (remaining <= 0) break;
+      if (slot.item_id !== itemId) continue;
+      if (canonicalMeta(slot.item_metadata) !== metaKey) continue;
+      const space = maxStack - slot.quantity;
+      if (space <= 0) continue;
+      const add = Math.min(space, remaining);
+      await client.query(
+        `UPDATE inventory_slots SET quantity = quantity + $1 WHERE character_id = $2 AND slot_index = $3`,
+        [add, characterId, slot.slot_index]
+      );
+      remaining -= add;
     }
 
     // Second pass: fill empty slot indexes with new stacks.
@@ -78,8 +94,8 @@ export async function giveItem(params: {
       if (occupiedIndexes.has(idx)) continue;
       const add = Math.min(maxStack, remaining);
       await client.query(
-        `INSERT INTO inventory_slots (character_id, slot_index, item_id, quantity) VALUES ($1, $2, $3, $4)`,
-        [characterId, idx, itemId, add]
+        `INSERT INTO inventory_slots (character_id, slot_index, item_id, quantity, item_metadata) VALUES ($1, $2, $3, $4, $5)`,
+        [characterId, idx, itemId, add, JSON.stringify(meta)]
       );
       remaining -= add;
       occupiedIndexes.add(idx);
@@ -97,7 +113,7 @@ export async function giveItem(params: {
         action: "inventory.give",
         targetType: "character",
         targetId: String(characterId),
-        payload: { itemId, quantity: params.quantity },
+        payload: { itemId, quantity: params.quantity, meta },
         result: "success",
       },
       client

@@ -28,6 +28,17 @@ interface TradeOffer {
   itemQty?: number;
 }
 
+/** Sorted-key JSON so two semantically-equal metadata objects compare equal. */
+function canonicalMeta(meta: unknown): string {
+  if (meta === null || meta === undefined) meta = {};
+  if (typeof meta !== "object") return String(meta);
+  const out: Record<string, unknown> = {};
+  for (const k of Object.keys(meta as Record<string, unknown>).sort()) {
+    out[k] = (meta as Record<string, unknown>)[k];
+  }
+  return JSON.stringify(out);
+}
+
 /**
  * Create a pending trade. Does NOT move anything yet — items/money stay
  * with their owners until the counterparty accepts. `initiatorGives` is
@@ -156,9 +167,11 @@ async function moveItem(
     remaining -= take;
   }
 
-  // give to receiver
+  // give to receiver — trades carry no item metadata, so incoming items
+  // only stack onto slots that are also metadata-empty (never merged into
+  // a durability-tagged stack, which would corrupt its data).
   const { rows: receiverSlots } = await client.query(
-    `SELECT slot_index, item_id, quantity FROM inventory_slots WHERE character_id = $1 ORDER BY slot_index FOR UPDATE`,
+    `SELECT slot_index, item_id, quantity, item_metadata FROM inventory_slots WHERE character_id = $1 ORDER BY slot_index FOR UPDATE`,
     [toCharacterId]
   );
   const occupied = new Set(receiverSlots.map((r: any) => r.slot_index));
@@ -167,6 +180,7 @@ async function moveItem(
   for (const slot of receiverSlots) {
     if (toPlace <= 0) break;
     if (slot.item_id !== itemId) continue;
+    if (canonicalMeta(slot.item_metadata) !== "{}") continue;
     const space = maxStack - slot.quantity;
     if (space <= 0) continue;
     const add = Math.min(space, toPlace);
@@ -260,7 +274,8 @@ const TRADE_EXPIRY_HOURS = 24;
 export async function expireOldTrades(): Promise<number> {
   const { rowCount } = await pool.query(
     `UPDATE trades SET status = 'expired', resolved_at = now()
-     WHERE status = 'pending' AND created_at < now() - interval '${TRADE_EXPIRY_HOURS} hours'`
+     WHERE status = 'pending' AND created_at < now() - $1::interval`,
+    [`${TRADE_EXPIRY_HOURS} hours`]
   );
   return rowCount ?? 0;
 }

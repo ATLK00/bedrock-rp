@@ -95,7 +95,18 @@ export async function issueSessionToken(userId: number): Promise<string> {
     [jti, userId, expiresAt]
   );
 
-  return jwt.sign({ sub: userId, jti }, config.JWT_SECRET, { expiresIn: SESSION_TTL_SECONDS });
+  // node-postgres returns BIGSERIAL/BIGINT column values as STRINGS (int8
+  // parser), so DB-derived user ids commonly arrive here as e.g. "7" even
+  // though the signature says number. verifySessionToken intentionally
+  // requires a numeric `sub` (forged-jti defense), so normalize here —
+  // otherwise every token issued from a DB-fetched user id would verify
+  // as null and logins would loop silently.
+  const numericUserId = Number(userId);
+  if (!Number.isInteger(numericUserId) || numericUserId <= 0) {
+    throw new Error(`cannot issue a session for invalid user id: ${String(userId)}`);
+  }
+
+  return jwt.sign({ sub: numericUserId, jti }, config.JWT_SECRET, { expiresIn: SESSION_TTL_SECONDS });
 }
 
 /**

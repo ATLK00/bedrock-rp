@@ -2,6 +2,7 @@ import { world, system } from "@minecraft/server";
 import { beforeEvents as adminBeforeEvents } from "@minecraft/server-admin";
 import { http, HttpRequest, HttpRequestMethod, HttpHeader } from "@minecraft/server-net";
 import { getBridgeConfig } from "./bridgeConfig.js";
+import { hmacSha256Hex } from "./crypto_hmac.js";
 
 /**
  * IDENTITY NOTE: `world.afterEvents.playerJoin`'s `event.playerId` is
@@ -16,14 +17,11 @@ import { getBridgeConfig } from "./bridgeConfig.js";
  * across sessions" — stable per player, which is what a linking scheme
  * actually needs. It is captured here (by player name) and looked up
  * again wherever we need "this player's persistent identity" (the
- * backend join-notify call, and the !link chat command).
+ * backend join-notify/heartbeat/leave calls, and the !link chat command).
  *
  * persistentId is NOT necessarily the literal Xbox Live xuid string —
- * it's an opaque stable identifier. The backend's `characters.persistent_id`
- * column stores this value (renamed from the old `characters.xuid`, a
- * holdover name that didn't mean literal Xbox xuid). Don't assume this
- * value has any external meaning outside this system. The wire field
- * (`xuid` in /bridge/character/link) is kept unchanged for compatibility.
+ * it's an opaque stable identifier. The wire field (`xuid` in
+ * /bridge/character/link) is kept unchanged for compatibility.
  */
 const persistentIdByName = new Map();
 
@@ -38,6 +36,38 @@ const persistentIdByName = new Map();
  * effect — acceptable for how rarely this changes.
  */
 let cachedBridgeConfig = null;
+
+/**
+ * Build a signed HttpRequest to the backend. In addition to the shared
+ * secret (which proves "this is our game server"), every call carries a
+ * timestamp + per-request nonce + HMAC-SHA256 signature over
+ * `${ts}\n${nonce}\n${rawBody}`. The backend rejects stale timestamps
+ * and replayed nonces, so a captured request can't be fed back later.
+ * The HMAC is implemented in pure JS (no crypto module in the Script
+ * API) — crypto_hmac.js is verified against RFC 4231 vectors.
+ */
+function makeSignedRequest(path, body) {
+  const rawBody = JSON.stringify(body);
+  const ts = String(Date.now());
+  const nonce = `${ts}-${Math.random().toString(36).slice(2, 12)}`;
+  const sig = hmacSha256Hex(cachedBridgeConfig.bridgeSecret, `${ts}\n${nonce}\n${rawBody}`);
+
+  const req = new HttpRequest(`${cachedBridgeConfig.backendUrl}${path}`);
+  req.method = HttpRequestMethod.Post;
+  req.headers = [
+    new HttpHeader("Content-Type", "application/json"),
+    new HttpHeader("x-bds-bridge-secret", cachedBridgeConfig.bridgeSecret),
+    new HttpHeader("x-bds-ts", ts),
+    new HttpHeader("x-bds-nonce", nonce),
+    new HttpHeader("x-bds-sig", sig),
+  ];
+  req.body = rawBody;
+  return req;
+}
+
+function postToBackend(path, body) {
+  return http.request(makeSignedRequest(path, body));
+}
 
 system.run(() => {
   cachedBridgeConfig = getBridgeConfig();
@@ -64,15 +94,7 @@ world.afterEvents.playerJoin.subscribe((event) => {
     return;
   }
 
-  const req = new HttpRequest(`${cachedBridgeConfig.backendUrl}/bridge/player/join`);
-  req.method = HttpRequestMethod.Post;
-  req.headers = [
-    new HttpHeader("Content-Type", "application/json"),
-    new HttpHeader("x-bds-bridge-secret", cachedBridgeConfig.bridgeSecret),
-  ];
-  req.body = JSON.stringify({ playerName: event.playerName, playerId: persistentId });
-
-  http.request(req).then(
+  postToBackend("/bridge/player/join", { playerName: event.playerName, playerId: persistentId }).then(
     (response) => {
       if (response.status < 200 || response.status >= 300) {
         console.warn(`[bedrock-rp] backend rejected player join notify: HTTP ${response.status}`);
@@ -83,6 +105,51 @@ world.afterEvents.playerJoin.subscribe((event) => {
     }
   );
 });
+
+world.afterEvents.playerLeave.subscribe((event) => {
+  if (cachedBridgeConfig) {
+    const persistentId = persistentIdByName.get(event.playerName);
+    if (persistentId) {
+      postToBackend("/bridge/player/leave", { playerName: event.playerName, playerId: persistentId }).then(
+        (response) => {
+          if (response.status < 200 || response.status >= 300) {
+            console.warn(`[bedrock-rp] backend rejected player leave notify: HTTP ${response.status}`);
+          }
+        },
+        (err) => {
+          console.warn(`[bedrock-rp] backend unreachable for player leave notify: ${err}`);
+        }
+      );
+    } else {
+      console.warn(`[bedrock-rp] no persistentId captured for leaving player ${event.playerName}`);
+    }
+  }
+  persistentIdByName.delete(event.playerName); // avoid an unbounded map across a long-running server
+});
+
+/**
+ * Heartbeat every ~30s for players still marked online (join fires once at
+ * connect; the heartbeat keeps the Redis presence TTL alive and updates
+ * last_seen in the DB). If a player hard-disconnects without a clean
+ * leave event, the heartbeat stops and the presence TTL (config, default
+ * 90s) expires them on its own — that's the "last seen / dropped conn"
+ * distinction.
+ */
+system.runInterval(() => {
+  if (!cachedBridgeConfig || persistentIdByName.size === 0) return;
+  for (const [playerName, persistentId] of persistentIdByName.entries()) {
+    postToBackend("/bridge/player/heartbeat", { playerName, playerId: persistentId }).then(
+      (response) => {
+        if (response.status >= 300) {
+          console.warn(`[bedrock-rp] backend rejected heartbeat: HTTP ${response.status}`);
+        }
+      },
+      (err) => {
+        console.warn(`[bedrock-rp] backend unreachable for heartbeat: ${err}`);
+      }
+    );
+  }
+}, 30 * 20); // 30 seconds (script ticks run ~20/sec)
 
 /**
  * `!link <code>` — player types this in chat after requesting a code on
@@ -120,15 +187,7 @@ world.beforeEvents.chatSend.subscribe((event) => {
     return;
   }
 
-  const req = new HttpRequest(`${cachedBridgeConfig.backendUrl}/bridge/character/link`);
-  req.method = HttpRequestMethod.Post;
-  req.headers = [
-    new HttpHeader("Content-Type", "application/json"),
-    new HttpHeader("x-bds-bridge-secret", cachedBridgeConfig.bridgeSecret),
-  ];
-  req.body = JSON.stringify({ code, xuid: persistentId });
-
-  http.request(req).then(
+  postToBackend("/bridge/character/link", { code, xuid: persistentId }).then(
     (response) => {
       try {
         const body = JSON.parse(response.body);
@@ -143,10 +202,6 @@ world.beforeEvents.chatSend.subscribe((event) => {
       console.warn(`[bedrock-rp] link request failed: ${err}`);
     }
   );
-});
-
-world.afterEvents.playerLeave.subscribe((event) => {
-  persistentIdByName.delete(event.playerName); // avoid an unbounded map across a long-running server
 });
 
 system.run(() => {
