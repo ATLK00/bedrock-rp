@@ -180,6 +180,21 @@ All new work is uncommitted as of this entry; handoff anchor policy unchanged
 describe the old pending-state of these features — those are snapshots, not
 current truth.
 
+### Follow-up (same evening, 2026-09-08 ~23:4x) — `trust proxy` verified, no code change
+- Spun the real backend up under docker `nginx:alpine` as a reverse proxy and
+  exercised the authLimiter (10/15min) through it:
+  - `TRUST_PROXY=1`: 10× waiting for `X-Forwarded-For: 1.2.3.4` → 204, the 11th
+    → 429; a different value (`5.5.5.5`) still → 204. Buckets keyed per real
+    client IP — the wiring in `app.ts` (set before any limiter/middleware reads
+    `req.ip`) works.
+  - `TRUST_PROXY=false` + XFF present: express-rate-limit v7 logs
+    `ERR_ERL_UNEXPECTED_X_FORWARDED_FOR` once (console noise, no 500, no
+    non-200) and keys on the socket address, ignoring the spoofed header —
+    misconfiguration fails loudly rather than silently.
+- No bug found; deployment caveat: `TRUST_PROXY` must equal the hop count of the
+  real topology (a second trusted proxy in front flips resolution to that
+  proxy's IP, per express semantics).
+
 ---
 
 ## [2026-09-06 00:00] — AI: Claude Sonnet 5 (claude.ai)

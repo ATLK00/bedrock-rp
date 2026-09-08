@@ -48,12 +48,28 @@
   unchanged for behavior-pack compatibility. Admin routes now require an
   authenticated `req.userId`. TypeScript build passes.
 - Working tree verified clean; no secrets in git history; `.env` ignored.
+- `trust proxy` config verified end-to-end (2026-09-08) with a live Express
+  instance + docker `nginx:alpine` reverse proxy in front:
+  - With `TRUST_PROXY=1`, hammering `/auth/logout` (authLimiter, 10/15min)
+    with `X-Forwarded-For: 1.2.3.4` gives 10×204 then 429 on the 11th, while a
+    different value (`5.5.5.5`) still gets 204 — buckets are keyed per real
+    client IP, i.e. `req.ip` resolves through the trusted proxy correctly.
+  - With `TRUST_PROXY=false` (default) and XFF present, express-rate-limit v7
+    does NOT key on the spoofed header; it logs its
+    `ERR_ERL_UNEXPECTED_X_FORWARDED_FOR` validation warning once and falls back
+    to the socket address (client still gets 200/204 — no 500, no silent
+    mis-keying). So a wrong/no proxy setting fails loudly, not silently.
+  - Caveat: hop count must match the real topology. `TRUST_PROXY=1` with a
+    chain of two proxies (client-facing proxy → nginx → backend) resolves the
+    client to the last untrusted hop (the first proxy's IP), by design. Test
+    that value against the actual deployment shape before relying on it.
 
 ## Unverified (needs infrastructure we don't have in a plain dev env)
-- `trust proxy` config (implemented, `TRUST_PROXY` env in `config/index.ts` +
-  `index.ts`) — cannot be tested without a real reverse proxy to confirm `req.ip`
-  reflects the client, not the proxy. Do NOT mark this verified until tested that way.
-- Nothing else in the built feature set is currently known-unverified.
+- (empty) — the previously-listed `trust proxy` item was verified with a real
+  docker nginx reverse proxy on 2026-09-08 (see Verified section). Verified via
+  harnessed API is the state of everything else; the two remaining genuinely
+  external paths are the live Minecraft-client round-trip and a real Discord
+  OAuth sign-in, which are tracked under Pending, not Unverified.
 
 ## Pending (features/tooling not built yet — not blocked items)
 - Automate the `level.dat` NBT patch for Beta-APIs worlds (currently manual, see README).
@@ -107,12 +123,13 @@ unusable, purely for table hygiene. Mirrors the trade-expiry job's exact pattern
   in-memory/`trust proxy` unconfigured, no CI/deploy/backup tooling).
 
 ## Next Recommended Task
-Automated integration tests are now in place (11/11 on the real docker stack)
-and the BDS pack is signed+heartbeat-capable. Remaining verified-gaps: deploy
-the pack to a live server and confirm the heartbeat/leave round-trip, then
-`trust proxy` verification behind a real reverse proxy (still the only
-infra-dependent item without a test). After that: CI gate on `npm run build` +
-`npm test`, NBT patch automation, inventory UI.
+Automated integration tests (11/11 on the real docker stack), the signed+BDS
+pack, and `trust proxy` (verified behind a real docker nginx) are all done.
+Remaining verified-gaps are the two genuinely external paths: (1) deploy the
+updated pack to a live server and confirm the heartbeat/leave + signed-call
+round-trip against real client joins; (2) complete a real Discord OAuth
+sign-in. After those: CI gate on `npm run build` + `npm test`, NBT patch
+automation, inventory UI.
 
 ## Do Not Change
 - One Discord account = one character
