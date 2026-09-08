@@ -73,11 +73,11 @@ export class CharacterAlreadyLinkedError extends Error {
 export async function generateLinkCodeForUser(userId: number): Promise<{ code: string; expiresAt: Date }> {
   const { pool } = await import("../../db/pool.js");
   const { rows: charRows } = await pool.query(
-    `SELECT id, xuid FROM characters WHERE user_id = $1 AND is_deleted = false`,
+    `SELECT id, persistent_id FROM characters WHERE user_id = $1 AND is_deleted = false`,
     [userId]
   );
   if (charRows.length === 0) throw new Error("no character found for this user");
-  if (charRows[0].xuid) throw new CharacterAlreadyLinkedError();
+  if (charRows[0].persistent_id) throw new CharacterAlreadyLinkedError();
 
   const code = generateLinkCode();
   const expiresAt = new Date(Date.now() + LINK_CODE_TTL_MINUTES * 60_000);
@@ -93,19 +93,25 @@ export class InvalidLinkCodeError extends Error {
     super("link code is invalid or expired");
   }
 }
-export class XuidAlreadyLinkedError extends Error {
+export class PersistentIdAlreadyLinkedError extends Error {
   constructor() {
     super("this Bedrock account is already linked to a different character");
   }
 }
+/** @deprecated kept as an alias so any external import of the old name doesn't break at compile time; use PersistentIdAlreadyLinkedError going forward. */
+export const XuidAlreadyLinkedError = PersistentIdAlreadyLinkedError;
 
 /**
  * Called from the BDS bridge (POST /bridge/character/link) when a player
- * types `/link <code>` in chat. Consumes the code — it cannot be reused
- * once claimed, whether the attempt succeeds or fails on the xuid check.
+ * types `!link <code>` in chat. Consumes the code — it cannot be reused
+ * once claimed, whether the attempt succeeds or fails on the persistent-id check.
+ *
+ * NOTE: the wire-level JSON field from the bridge route is still named
+ * `xuid` (see bridge/index.ts) even though this function's param is now
+ * `persistentId` — that's deliberate, see migration 015's comment.
  */
-export async function consumeLinkCode(params: { code: string; xuid: string }) {
-  const { code, xuid } = params;
+export async function consumeLinkCode(params: { code: string; persistentId: string }) {
+  const { code, persistentId } = params;
   return withTransaction(async (client) => {
     const { rows } = await client.query(
       `SELECT id, user_id FROM characters
@@ -116,17 +122,17 @@ export async function consumeLinkCode(params: { code: string; xuid: string }) {
     if (rows.length === 0) throw new InvalidLinkCodeError();
     const character = rows[0];
 
-    const { rows: xuidRows } = await client.query(
-      `SELECT id FROM characters WHERE xuid = $1 AND is_deleted = false`,
-      [xuid]
+    const { rows: persistentIdRows } = await client.query(
+      `SELECT id FROM characters WHERE persistent_id = $1 AND is_deleted = false`,
+      [persistentId]
     );
-    if (xuidRows.length > 0 && xuidRows[0].id !== character.id) {
-      throw new XuidAlreadyLinkedError();
+    if (persistentIdRows.length > 0 && persistentIdRows[0].id !== character.id) {
+      throw new PersistentIdAlreadyLinkedError();
     }
 
     await client.query(
-      `UPDATE characters SET xuid = $1, link_code = NULL, link_code_expires_at = NULL WHERE id = $2`,
-      [xuid, character.id]
+      `UPDATE characters SET persistent_id = $1, link_code = NULL, link_code_expires_at = NULL WHERE id = $2`,
+      [persistentId, character.id]
     );
     await writeAudit(
       {
@@ -134,7 +140,7 @@ export async function consumeLinkCode(params: { code: string; xuid: string }) {
         action: "character.link",
         targetType: "character",
         targetId: String(character.id),
-        payload: { xuid },
+        payload: { persistentId },
         result: "success",
       },
       client

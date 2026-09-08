@@ -48,3 +48,29 @@ config, `characters.xuid` rename, NBT patch automation, CI/deploy/backup).
 - Modular resource architecture
 - Backup/rollback requirements
 - AI changelog/handoff process
+
+## 015 completion
+015 is complete.
+
+### Database
+- characters.xuid -> characters.persistent_id
+- Unique constraint renamed to characters_persistent_id_key
+- No xuid column remains in characters
+
+### Backend
+- Character module uses persistent_id
+- Bridge module uses persistent_id
+- External wire fields remain unchanged for compatibility
+- Admin routes require an authenticated eq.userId
+
+### Verification
+- TypeScript build: PASS
+- JWT/session verification: PASS
+- Authenticated link-code endpoint: PASS
+- Database schema verification: PASS
+- Test data cleanup: COMPLETE
+
+### Cleanup
+Temporary test sessions, characters, trades, and transactions were removed.
+
+015 is ready to close.

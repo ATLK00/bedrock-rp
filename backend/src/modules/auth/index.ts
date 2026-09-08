@@ -1,4 +1,4 @@
-import jwt from "jsonwebtoken";
+﻿import jwt from "jsonwebtoken";
 import { randomUUID } from "node:crypto";
 import { pool } from "../../db/pool.js";
 import { config } from "../../config/index.js";
@@ -18,11 +18,11 @@ interface DiscordUserResponse {
 /**
  * Exchange a Discord OAuth2 authorization code for the user's Discord
  * identity, then upsert our local `users` row. Requires
- * DISCORD_CLIENT_ID/SECRET/REDIRECT_URI to be set — throws a clear error
+ * DISCORD_CLIENT_ID/SECRET/REDIRECT_URI to be set â€” throws a clear error
  * if they aren't, rather than silently failing partway through.
  *
  * NOT YET TESTED against a real Discord app (no network in the
- * environment that wrote this) — verify the token/user endpoints and
+ * environment that wrote this) â€” verify the token/user endpoints and
  * error handling against a real Discord OAuth2 app before trusting this
  * in production. See CHANGELOG_AI.md for this iteration.
  */
@@ -82,7 +82,7 @@ const SESSION_TTL_SECONDS = 60 * 60 * 24 * 7; // 7 days
 /**
  * Issues a JWT AND records its `jti` in the `sessions` table. The JWT's
  * own signature/expiry is still checked first (cheap, no DB hit), but
- * every verification also checks `sessions.revoked_at IS NULL` — this
+ * every verification also checks `sessions.revoked_at IS NULL` â€” this
  * is what makes it possible to kill a specific session (or all of a
  * user's sessions) before natural JWT expiry, e.g. when banning someone.
  */
@@ -101,7 +101,7 @@ export async function issueSessionToken(userId: number): Promise<string> {
 /**
  * Verifies the JWT signature/expiry, then checks the session hasn't
  * been revoked and the user isn't banned. Every check after the JWT
- * signature is a DB round trip — acceptable for this project's scale;
+ * signature is a DB round trip â€” acceptable for this project's scale;
  * revisit with a cache if this becomes a hot path under real load.
  *
  * SECURITY: the returned user id comes from `sessions.user_id` (the DB
@@ -117,11 +117,24 @@ export async function issueSessionToken(userId: number): Promise<string> {
 export async function verifySessionToken(token: string): Promise<number | null> {
   let payload: { sub: number; jti: string };
   try {
-    payload = jwt.verify(token, config.JWT_SECRET) as { sub: number; jti: string };
+    const decoded = jwt.verify(token, config.JWT_SECRET);
+
+    if (
+      typeof decoded === "string" ||
+      typeof decoded.sub !== "number" ||
+      typeof decoded.jti !== "string"
+    ) {
+      return null;
+    }
+
+    payload = {
+      sub: decoded.sub,
+      jti: decoded.jti,
+    };
   } catch {
-    return null; // expired/invalid signature — treat as unauthenticated, not a crash
+    return null; // expired/invalid signature â€” treat as unauthenticated, not a crash
   }
-  if (!payload.jti) return null; // old-format token issued before this migration — force re-login
+  if (!payload.jti) return null; // old-format token issued before this migration â€” force re-login
 
   const { rows } = await pool.query(
     `SELECT s.user_id, s.revoked_at, s.expires_at, u.is_banned
@@ -130,11 +143,11 @@ export async function verifySessionToken(token: string): Promise<number | null> 
      WHERE s.jti = $1`,
     [payload.jti]
   );
-  if (rows.length === 0) return null; // session record missing (e.g. DB reset) — force re-login
+  if (rows.length === 0) return null; // session record missing (e.g. DB reset) â€” force re-login
   const session = rows[0];
   if (session.revoked_at || session.is_banned) return null;
   if (new Date(session.expires_at) < new Date()) return null;
-  if (String(session.user_id) !== String(payload.sub)) return null; // jti belongs to a different user than claimed — forged/mismatched token
+  if (String(session.user_id) !== String(payload.sub)) return null; // jti belongs to a different user than claimed â€” forged/mismatched token
 
   return payload.sub;
 }
@@ -143,7 +156,7 @@ export async function revokeSession(jti: string) {
   await pool.query(`UPDATE sessions SET revoked_at = now() WHERE jti = $1 AND revoked_at IS NULL`, [jti]);
 }
 
-/** Kills every active session for a user — call this when banning someone. */
+/** Kills every active session for a user â€” call this when banning someone. */
 export async function revokeAllSessionsForUser(userId: number) {
   await pool.query(
     `UPDATE sessions SET revoked_at = now() WHERE user_id = $1 AND revoked_at IS NULL`,
@@ -151,7 +164,7 @@ export async function revokeAllSessionsForUser(userId: number) {
   );
 }
 
-/** Express middleware: reads the session cookie, sets req.userId if valid. Does NOT reject if missing — routes that need auth use requirePermission() separately, which itself 401s. */
+/** Express middleware: reads the session cookie, sets req.userId if valid. Does NOT reject if missing â€” routes that need auth use requirePermission() separately, which itself 401s. */
 export async function sessionMiddleware(req: any, _res: any, next: any) {
   try {
     const token = req.cookies?.[SESSION_COOKIE];
@@ -180,12 +193,12 @@ export const authRouterCookieName = SESSION_COOKIE;
 
 /**
  * Deletes `sessions` rows that are no longer useful for anything: past
- * their `expires_at`, or already `revoked_at`. Safe to run any time —
+ * their `expires_at`, or already `revoked_at`. Safe to run any time â€”
  * a deleted row was never going to authenticate anyone again anyway
  * (verifySessionToken already rejects both expired and revoked
  * sessions); this is purely table hygiene so `sessions` doesn't grow
  * unboundedly on a long-running server. Kept separate from
- * revocation/expiry logic itself — deleting a row is not what makes a
+ * revocation/expiry logic itself â€” deleting a row is not what makes a
  * session stop working, it's already not working by the time this runs.
  */
 export async function cleanupOldSessions(): Promise<number> {
@@ -216,3 +229,4 @@ export function stopSessionCleanupJob() {
     sessionCleanupHandle = null;
   }
 }
+

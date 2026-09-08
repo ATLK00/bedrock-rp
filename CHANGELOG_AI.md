@@ -1650,3 +1650,15 @@ Two low-risk hardening items from the backlog, bundled since they're independent
 
 ### Handoff Notes
 Bundled these two because they're independent (different files, no shared code path) and both small enough to test together in one pass once real infra is available â€” not because they're related features. Everything else in `AI_HANDOFF.md`'s Pending list is untouched.
+
+## 015 — persistent_id rename
+- Renamed characters.xuid to characters.persistent_id
+- Renamed unique constraint to characters_persistent_id_key
+- Preserved wire/API compatibility:
+  - /bridge/character/link still accepts xuid
+  - /bridge/player/join still accepts playerId
+- Updated character and bridge DB queries to use persistent_id
+- Added authenticated admin-route guard and fixed eq.userId typing
+- Verified backend build successfully
+- Verified session/JWT middleware and authenticated /character/link-code
+- Cleaned all temporary test sessions, characters, trades, and transactions

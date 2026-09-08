@@ -1,4 +1,4 @@
-import { Router } from "express";
+﻿import { Router } from "express";
 import { requirePermission } from "../../rbac/index.js";
 import * as economy from "../economy/index.js";
 import * as character from "../character/index.js";
@@ -13,9 +13,16 @@ import { cleanupOldSessions } from "../auth/index.js";
  * Admin HTTP routes. Every route:
  *   1. requires a specific permission (RBAC),
  *   2. delegates to the owning module (economy/character), which itself audits.
- * Do not put business logic here — this file is routing + authorization only.
+ * Do not put business logic here â€” this file is routing + authorization only.
  */
 export const adminRouter = Router();
+
+adminRouter.use((req, res, next) => {
+  if (typeof req.userId !== "number") {
+    return res.status(401).json({ error: "unauthenticated" });
+  }
+  next();
+});
 
 adminRouter.post("/economy/grant", requirePermission("economy.grant"), async (req, res) => {
   const { characterId, amountCents, reason } = req.body ?? {};
@@ -23,7 +30,7 @@ adminRouter.post("/economy/grant", requirePermission("economy.grant"), async (re
     return res.status(400).json({ error: "characterId, amountCents, reason are required" });
   }
   try {
-    await economy.grant({ characterId, amountCents, reason, actorUserId: req.userId });
+    await economy.grant({ characterId, amountCents, reason, actorUserId: req.userId! });
     res.status(204).end();
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -35,7 +42,7 @@ adminRouter.post("/character/whitelist", requirePermission("character.whitelist"
   if (typeof characterId !== "number" || typeof whitelisted !== "boolean") {
     return res.status(400).json({ error: "characterId (number) and whitelisted (boolean) are required" });
   }
-  await character.setWhitelisted({ characterId, whitelisted, actorUserId: req.userId });
+  await character.setWhitelisted({ characterId, whitelisted, actorUserId: req.userId! });
   res.status(204).end();
 });
 
@@ -45,7 +52,7 @@ adminRouter.post("/inventory/give", requirePermission("inventory.give"), async (
     return res.status(400).json({ error: "characterId (number), itemId (string), quantity (number) are required" });
   }
   try {
-    await inventory.giveItem({ characterId, itemId, quantity, actorUserId: req.userId });
+    await inventory.giveItem({ characterId, itemId, quantity, actorUserId: req.userId! });
     res.status(204).end();
   } catch (err: any) {
     if (err instanceof inventory.ItemNotFoundError) return res.status(404).json({ error: err.message });
@@ -60,7 +67,7 @@ adminRouter.post("/inventory/remove", requirePermission("inventory.remove"), asy
     return res.status(400).json({ error: "characterId (number), itemId (string), quantity (number) are required" });
   }
   try {
-    await inventory.removeItem({ characterId, itemId, quantity, actorUserId: req.userId });
+    await inventory.removeItem({ characterId, itemId, quantity, actorUserId: req.userId! });
     res.status(204).end();
   } catch (err: any) {
     if (err instanceof inventory.InsufficientItemsError) return res.status(409).json({ error: err.message });
@@ -70,7 +77,7 @@ adminRouter.post("/inventory/remove", requirePermission("inventory.remove"), asy
 
 /**
  * Role management is gated behind 'rbac.manage_roles'. Now granted to
- * `admin` (see 012_role_hierarchy.sql) — safe because grantRole/revokeRole
+ * `admin` (see 012_role_hierarchy.sql) â€” safe because grantRole/revokeRole
  * enforce a rank hierarchy internally (see rbac/admin.ts): an `admin`
  * can hand out `moderator` but not `admin` or `owner`, so this doesn't
  * open a self-escalation path. `owner`'s RBAC bypass can still manage
@@ -82,7 +89,7 @@ adminRouter.post("/roles/grant", requirePermission("rbac.manage_roles"), async (
     return res.status(400).json({ error: "userId (number) and roleName (string) are required" });
   }
   try {
-    await rbacAdmin.grantRole({ userId, roleName, actorUserId: req.userId });
+    await rbacAdmin.grantRole({ userId, roleName, actorUserId: req.userId! });
     res.status(204).end();
   } catch (err: any) {
     if (err instanceof rbacAdmin.RoleNotFoundError) return res.status(404).json({ error: err.message });
@@ -97,7 +104,7 @@ adminRouter.post("/roles/revoke", requirePermission("rbac.manage_roles"), async 
     return res.status(400).json({ error: "userId (number) and roleName (string) are required" });
   }
   try {
-    await rbacAdmin.revokeRole({ userId, roleName, actorUserId: req.userId });
+    await rbacAdmin.revokeRole({ userId, roleName, actorUserId: req.userId! });
     res.status(204).end();
   } catch (err: any) {
     if (err instanceof rbacAdmin.RoleNotFoundError) return res.status(404).json({ error: err.message });
@@ -107,7 +114,7 @@ adminRouter.post("/roles/revoke", requirePermission("rbac.manage_roles"), async 
 });
 
 /**
- * Banning revokes every active session for the user immediately — a ban
+ * Banning revokes every active session for the user immediately â€” a ban
  * that leaves existing sessions valid until natural JWT expiry isn't a
  * real ban. See modules/users/index.ts and modules/auth/index.ts's
  * sessions table for how revocation actually takes effect.
@@ -117,7 +124,7 @@ adminRouter.post("/users/ban", requirePermission("user.ban"), async (req, res) =
   if (typeof userId !== "number" || !reason) {
     return res.status(400).json({ error: "userId (number) and reason (string) are required" });
   }
-  await users.banUser({ userId, reason, actorUserId: req.userId });
+  await users.banUser({ userId, reason, actorUserId: req.userId! });
   res.status(204).end();
 });
 
@@ -126,14 +133,14 @@ adminRouter.post("/users/unban", requirePermission("user.ban"), async (req, res)
   if (typeof userId !== "number") {
     return res.status(400).json({ error: "userId (number) is required" });
   }
-  await users.unbanUser({ userId, actorUserId: req.userId });
+  await users.unbanUser({ userId, actorUserId: req.userId! });
   res.status(204).end();
 });
 
 /**
  * Read-only: lets an admin see a listing's current values before
  * calling upsertListing (which fully overwrites all three price/stock
- * fields — there was previously no way to check what you'd be
+ * fields â€” there was previously no way to check what you'd be
  * clobbering without querying the DB directly).
  */
 adminRouter.get("/shop/listing/:itemId", requirePermission("shop.manage"), async (req, res) => {
@@ -145,7 +152,7 @@ adminRouter.get("/shop/listing/:itemId", requirePermission("shop.manage"), async
 /**
  * Upsert = create-or-update. Pass null explicitly for buyPriceCents/
  * sellPriceCents/stock to mean "not purchasable"/"not sellable"/
- * "unlimited" respectively — omitting a field is NOT the same as null
+ * "unlimited" respectively â€” omitting a field is NOT the same as null
  * here, so the client must send the field even to clear it.
  */
 adminRouter.post("/shop/listing", requirePermission("shop.manage"), async (req, res) => {
@@ -167,7 +174,7 @@ adminRouter.post("/shop/listing", requirePermission("shop.manage"), async (req, 
       buyPriceCents: buyPriceCents ?? null,
       sellPriceCents: sellPriceCents ?? null,
       stock: stock ?? null,
-      actorUserId: req.userId,
+      actorUserId: req.userId!,
     });
     res.status(204).end();
   } catch (err: any) {
@@ -179,13 +186,13 @@ adminRouter.post("/shop/listing", requirePermission("shop.manage"), async (req, 
 adminRouter.post("/shop/listing/remove", requirePermission("shop.manage"), async (req, res) => {
   const { itemId } = req.body ?? {};
   if (!itemId) return res.status(400).json({ error: "itemId (string) is required" });
-  await shop.removeListing({ itemId, actorUserId: req.userId });
+  await shop.removeListing({ itemId, actorUserId: req.userId! });
   res.status(204).end();
 });
 
 /**
  * Manually triggers the trade expiry sweep immediately instead of
- * waiting for the periodic job's next tick — mainly useful for ops/
+ * waiting for the periodic job's next tick â€” mainly useful for ops/
  * testing. The periodic job (see trade/index.ts's startExpiryJob())
  * runs this same function automatically every hour in normal operation.
  */
@@ -196,12 +203,13 @@ adminRouter.post("/trades/expire-check", requirePermission("trade.manage"), asyn
 
 /**
  * Manually triggers stale-session cleanup immediately instead of
- * waiting for the periodic job's next tick — mainly useful for ops/
+ * waiting for the periodic job's next tick â€” mainly useful for ops/
  * testing. The periodic job (see auth/index.ts's startSessionCleanupJob())
  * runs this same function automatically every hour in normal operation.
- * Deletes rows only — does not affect any currently-valid session.
+ * Deletes rows only â€” does not affect any currently-valid session.
  */
 adminRouter.post("/sessions/cleanup-check", requirePermission("auth.manage"), async (req, res) => {
   const count = await cleanupOldSessions();
   res.json({ cleanedUpCount: count });
 });
+
