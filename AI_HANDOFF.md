@@ -115,16 +115,16 @@
   reconnect confirmation and a re-smoke on current HEAD — see Unverified.
 
 ## Unverified (needs infrastructure we don't have in a plain dev env)
-- Live Minecraft round-trip — **mostly VERIFIED (evidence dated 2026-09-08,
-  pre-foundation-round HEAD)**: real client join → BDS → behavior pack → signed
-  HTTP → backend → PostgreSQL confirmed for join/presence/heartbeat/session
-  rotation/leave, `!link` code consume, persistent-id binding, and
-  character-session-resolve (a join after linking produced a session row with
-  `character_id` auto-filled). See Verified. Remaining on this item: (a) a final
-  leave → rejoin-without-`!link` reconnect confirmation (expect a new session id
-  carrying the same `character_id` with `left_at = NULL`), and (b) a quick
-  re-smoke on current HEAD, since `player_session` gained the stale-heartbeat
-  guard + concurrent-join idempotency in the 2026-09-09 round.
+- Live Minecraft round-trip — **mostly VERIFIED** (full evidence + raw
+  `player_sessions` output captured in the Verified block above, dated
+  2026-09-08). What the existing evidence already covers: join/presence/heartbeat/
+  session-rotation/leave, `!link` code consume, persistent-id binding, and
+  character-session-resolve (session after linking got `character_id` auto-filled).
+  Remaining on this item: (a) a final leave → rejoin-without-`!link` reconnect
+  confirmation (expect a new session id carrying the same `character_id` with
+  `left_at = NULL`), and (b) a quick re-smoke on current HEAD, since
+  `player_session` gained the stale-heartbeat guard + concurrent-join idempotency
+  in the 2026-09-09 round.
 - Real Discord OAuth — code exists (`GET /auth/discord/login` →
   oauth2/authorize → `/auth/discord/callback` → exchange code → upsert user →
   issue session) and is structurally covered by the HTTP-layer suite, but the
