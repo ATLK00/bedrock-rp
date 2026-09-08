@@ -2,7 +2,7 @@
 
 ## Project State
 - Version: 0.1.0
-- This handoff describes the project state at commit `9adec4f` (see Version Control).
+- This handoff describes the project state at commit `ab026f7` (see Version Control).
 - NOT a blanket "fully verified" claim: the core feature set is verified against
   real infrastructure; a small set of infrastructure-dependent paths remains
   explicitly unverified (listed below under **Unverified**).
@@ -47,11 +47,15 @@
 
 ## Version Control
 - Git repo initialized 2026-09-08.
-- Commit this handoff is based on: `9adec4f`. The 015 `persistent_id` rename
+- Commit this handoff is based on: `ab026f7`. The 015 `persistent_id` rename
   work is committed as `744f82b` (Complete persistent id rename).
-- Confirm with `git rev-parse --short HEAD` / `git status --short` when
-  starting work — a handoff is a snapshot, so later bookkeeping commits may
-  sit on top of it.
+- This reference is a **frozen anchor**: it is the project-state commit this
+  handoff documents. Purely administrative commits (hash/ref touch-ups) may
+  legitimately sit on top of it — check `git log` / `git rev-parse --short HEAD`
+  when starting work, don't treat a top-of-tree admin commit as a drift to fix.
+  A commit's hash depends on its content, and the handoff (part of the content)
+  cites the hash, so `HEAD` and the cited hash can never literally be the same
+  commit; treating the anchor as frozen is by design.
 - `JWT_SECRET` never leaked: no git history predates the repo; `.env` is in
   `.gitignore` (verified via `git check-ignore`).
 
