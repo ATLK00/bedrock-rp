@@ -102,6 +102,136 @@ Chain still untested live: Minecraft Client → BDS → Behavior Pack → signed
 
 ---
 
+## [2026-09-08] — AI: ChatGPT — PROJECT STATUS UPDATE
+
+### Task
+Update project changelog after completing and verifying the current Character / Player Session foundation and migration `015`.
+
+### Completed
+
+#### Character System
+- [PASS] Character creation flow verified.
+- [PASS] Character link-code generation verified.
+- [PASS] Character linking from Minecraft verified.
+- [PASS] BDS `persistentId` is persisted as the character's `persistent_id`.
+- [PASS] Character `last_seen_at` updates correctly.
+- [PASS] Character remains linked after reconnect.
+- [PASS] Persistent ID duplicate protection exists in the bridge link flow.
+
+#### Persistent ID Rename
+- [PASS] Renamed database column:
+  - `characters.xuid` → `characters.persistent_id`
+- [PASS] Renamed unique constraint:
+  - `characters_xuid_key` → `characters_persistent_id_key`
+- Migration:
+  - `015_persistent_id.sql`
+- Important:
+  - External bridge/API wire fields such as `xuid` and `playerId` remain unchanged for compatibility.
+  - Historical changelog/documentation references to `xuid` are not globally replaced.
+
+#### Player Session / Online State
+- [PASS] BDS player join reaches backend.
+- [PASS] Player session is created in PostgreSQL.
+- [PASS] Redis online presence is created.
+- [PASS] Redis presence TTL is applied.
+- [PASS] Heartbeat refreshes Redis presence.
+- [PASS] Heartbeat updates `last_seen_at`.
+- [PASS] Player leave removes Redis presence.
+- [PASS] Player leave closes the PostgreSQL session.
+- [PASS] Reconnect creates a new session while resolving the same character through persistent ID.
+- [PASS] Reconnect does not require linking the character again.
+
+### Live Verification
+
+Tested with real BDS + PostgreSQL + Redis infrastructure.
+
+Observed:
+- BDS version: `1.26.45.1`
+- Minecraft player successfully joined backend.
+- Persistent ID was received from `@minecraft/server-admin`.
+- Character was successfully linked.
+- Redis `SET` heartbeat activity was observed with the configured TTL.
+- Leave/reconnect behavior was verified.
+- PostgreSQL session records correctly distinguish the previous closed session from the new active session.
+
+### Current Remaining Work
+
+#### Character
+- [TODO] Implement/verify character selection when a user owns multiple characters.
+- [TODO] Implement/verify character deletion.
+- [TODO] Verify all ownership and duplicate-character edge cases.
+
+#### Player Session
+- [TODO] Prevent/handle concurrent duplicate sessions for the same persistent ID.
+- [TODO] Handle stale heartbeat/session edge cases.
+
+#### Inventory
+- [TODO] Design and implement inventory data model.
+- [TODO] Item definitions.
+- [TODO] Stack/quantity handling.
+- [TODO] Durability/metadata.
+- [TODO] Atomic transactions to prevent item duplication/loss.
+- [TODO] Inventory API for web/gameplay systems.
+
+#### Economy
+- [TODO] Character wallet/money.
+- [TODO] Add/subtract transactions.
+- [TODO] Prevent negative balance.
+- [TODO] Transaction history.
+- [TODO] Economy audit logging.
+
+#### Admin / RBAC
+- [TODO] Complete permission coverage across endpoints.
+- [TODO] Complete admin action auditing.
+- [TODO] Add broader permission tests.
+- Role rank hierarchy has already been implemented and verified against real infrastructure.
+
+#### Bridge Hardening
+- [TODO] Rate limiting.
+- [TODO] Request validation hardening.
+- [TODO] Idempotency protection.
+- [TODO] Timeout/error handling.
+- [TODO] Structured bridge logging.
+
+#### Database Integrity
+- [TODO] Full review of foreign keys.
+- [TODO] Index review.
+- [TODO] Unique constraints.
+- [TODO] CHECK constraints.
+- [TODO] Cascade behavior.
+- [TODO] Transaction boundaries.
+
+#### Automated Tests
+- [TODO] Auth tests.
+- [TODO] Character selection/deletion tests.
+- [TODO] Inventory tests.
+- [TODO] Economy tests.
+- [TODO] Permission/RBAC tests.
+- [TODO] Additional bridge edge-case tests.
+- Existing integration tests cover several session, presence, reconnect, bridge replay, and character-link flows.
+
+### Recommended Development Order
+
+1. Finish Character System
+2. Review Database Integrity
+3. Implement Inventory
+4. Implement Economy
+5. Complete Admin/RBAC
+6. Harden Bridge
+7. Expand Automated Tests
+8. Build Web UI
+9. Connect Minecraft gameplay systems
+
+### Status
+
+Core authentication, character linking, persistent identity, player sessions, Redis online presence, heartbeat, reconnect handling, and RBAC rank hierarchy are now established.
+
+Inventory and Economy are the next major backend systems to implement.
+
+Do not mark the entire RP backend as complete. The current foundation is functional, but the gameplay/economy/inventory layers are still incomplete.
+
+---
+
 ## [2026-09-08 23:35] — AI: big-pickle (opencode)
 
 ### Task
