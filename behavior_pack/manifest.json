@@ -1,0 +1,24 @@
+{
+  "format_version": 2,
+  "header": {
+    "name": "BEDROCK-RP Core",
+    "description": "Core RP framework — bridge to backend, event hooks. Version numbers are placeholders until BDS/API version is confirmed.",
+    "uuid": "6950dea8-509c-4d10-90d5-14e399559017",
+    "version": [0, 1, 0],
+    "min_engine_version": [1, 21, 0]
+  },
+  "modules": [
+    {
+      "type": "script",
+      "language": "javascript",
+      "uuid": "4c029cf4-5906-4aaf-983e-5c0ed8fe8ebc",
+      "version": [0, 1, 0],
+      "entry": "scripts/main.js"
+    }
+  ],
+  "dependencies": [
+    { "module_name": "@minecraft/server", "version": "2.10.0-beta" },
+    { "module_name": "@minecraft/server-admin", "version": "1.0.0-beta" },
+    { "module_name": "@minecraft/server-net", "version": "1.0.0-beta" }
+  ]
+}

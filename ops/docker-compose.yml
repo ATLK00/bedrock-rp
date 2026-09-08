@@ -1,0 +1,34 @@
+version: "3.9"
+
+# Local dev only. Staging/production compose or deployment pipeline
+# is not defined yet (see AI_HANDOFF.md Pending).
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: bedrock_rp
+      POSTGRES_PASSWORD: changeme
+      POSTGRES_DB: bedrock_rp
+    ports:
+      - "5434:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bedrock_rp"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  pg_data:
