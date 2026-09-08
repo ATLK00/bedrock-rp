@@ -1402,6 +1402,43 @@ whole (permissions, boundaries, and now hierarchy) has complete
 real-world test coverage once this entry's tests are run.
 
 ---
+## [2026-09-08 11:30] — AI: Claude Sonnet 5 (claude.ai) — USER-VERIFIED
+
+### Task
+Verify `JWT_SECRET` was never leaked via git history, then set the project up with real version control since none existed yet.
+
+### Changed
+- `.gitignore` — added `*_body.json` and `grant_*.json` patterns to cover ad-hoc curl test payload files.
+- Repo: initialized git (`git init`) for the first time in this project's life; made initial commit; removed 25 throwaway test-payload `.json` files (`exploit.json`, `overbuy.json`, `grant_admin*.json`, etc.) that had been created during manual RBAC/economy testing sessions and were never meant to be tracked.
+
+### Why
+- `AI_HANDOFF.md`'s Pending list flagged confirming `JWT_SECRET` never leaked into source control. Investigation found the project had no `git` installation at all on the dev machine — so there was no history for it to have leaked into. Decided to set up git now rather than leave the project without version control indefinitely.
+- The throwaway `.json` files were cluttering `backend/` and `ops/` with non-source artifacts from earlier manual testing; removed them and added `.gitignore` patterns so future ad-hoc test payloads don't get committed by accident.
+
+### Dependencies / Impact
+- No code or runtime behavior changed — this is tooling/repo-hygiene only.
+- Anyone cloning this repo going forward gets a clean history starting from this initial commit; no prior undocumented history exists to worry about.
+
+### Tests
+- [PASS] `git status --porcelain | Select-String "\.env"` before and after `git add .` — confirmed `backend/.env` (the real secrets file) never got staged; only `backend/.env.example` was tracked.
+- [PASS] `git log --oneline` — commits landed as expected: initial commit (76 files), throwaway-file removal (25 deletions), `.gitignore` fix (added then de-duplicated).
+- [PASS] Caught and fixed a duplication bug where a `.gitignore` append command was accidentally run twice, verified via `Get-Content .gitignore` before the final fix commit.
+
+### Security
+- Confirmed no git history existed prior to this session, so `JWT_SECRET` (or any other secret) cannot have leaked via git — the concern in `AI_HANDOFF.md`'s Pending list is resolved by way of there being nothing to check.
+- `.gitignore` already covered `.env` before this session; verified it holds going forward with every commit made.
+
+### Known Issues
+- Git author identity (`user.name`/`user.email`) is only configured locally on this one dev machine — not yet relevant until this repo is pushed anywhere or shared.
+- No remote configured yet (this is a local-only repo for now).
+
+### Next Steps
+1. If/when a remote is needed (GitHub, GitLab, etc.), add it with `git remote add origin <url>` and push.
+2. Continue with remaining `AI_HANDOFF.md` Pending items: `trust proxy` verification (needs a real reverse proxy), `characters.xuid` rename, NBT patch automation, inventory UI decision, CI/deploy/backup tooling.
+
+### Handoff Notes
+This project now has real version control for the first time — treat `990e50c` as the true starting point of history. Nothing before this commit exists to inspect or blame; don't assume older history is retrievable.
+
 ## [2026-09-08 09:00] — AI: Claude Sonnet 5 (claude.ai)
 
 ### Task
