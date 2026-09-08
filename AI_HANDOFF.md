@@ -2,7 +2,7 @@
 
 ## Project State
 - Version: 0.1.0
-- This handoff describes the project state at commit `fe80746` (see Version Control).
+- This handoff describes the project state at commit `9adec4f` (see Version Control).
 - NOT a blanket "fully verified" claim: the core feature set is verified against
   real infrastructure; a small set of infrastructure-dependent paths remains
   explicitly unverified (listed below under **Unverified**).
@@ -47,7 +47,7 @@
 
 ## Version Control
 - Git repo initialized 2026-09-08.
-- Commit this handoff is based on: `fe80746`. The 015 `persistent_id` rename
+- Commit this handoff is based on: `9adec4f`. The 015 `persistent_id` rename
   work is committed as `744f82b` (Complete persistent id rename).
 - Confirm with `git rev-parse --short HEAD` / `git status --short` when
   starting work — a handoff is a snapshot, so later bookkeeping commits may
