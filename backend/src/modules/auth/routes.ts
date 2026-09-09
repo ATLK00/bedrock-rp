@@ -1,4 +1,4 @@
-import { Router } from "express";
+import { Router, type Request, type Response } from "express";
 import { config } from "../../config/index.js";
 import { exchangeDiscordCode, issueSessionToken, setSessionCookie, revokeSession } from "./index.js";
 import jwt from "jsonwebtoken";
@@ -16,6 +16,30 @@ function generateOAuthState(): { value: string; expiresAt: number } {
 }
 
 const AUTH_STATE_COOKIE = "bedrock_rp_oauth_state";
+
+// State-cookie failure rendered for browsers: the #1 cause is opening the
+// panel on a different host than the registered DISCORD_REDIRECT_URI (a
+// 127.0.0.1-opened login mints a state cookie Discord's callback on
+// localhost never receives — cookies are host-bound). Panels auto-jump to
+// the canonical origin, but a direct callback hit still deserves a readable
+// hint instead of a bare JSON body. API clients keep the machine format.
+function stateErrorResponse(req: Request, res: Response) {
+  if ((req.headers.accept ?? "").includes("text/html")) {
+    const uri = config.DISCORD_REDIRECT_URI;
+    if (!uri) return res.status(400).json({ error: "invalid state" });
+    const origin = new URL(uri).origin;
+    return res.status(400).send(
+      `<!doctype html><html lang="th"><head><meta charset="utf-8">` +
+        `<title>เข้าสู่ระบบขัดจังหวะ</title></head>` +
+        `<body style="font-family:system-ui;background:#101317;color:#e6e6e6;padding:24px">` +
+        `<h1>การเข้าสู่ระบบขัดจังหวะ (invalid state)</h1>` +
+        `<p>คุกกี้ OAuth state ไม่ตรงกัน — ส่วนใหญ่เกิดจากการเปิดแผงด้วย host ที่ไม่ตรงกับที่ลงทะเบียนกับ Discord ไว้.</p>` +
+        `<p>ให้เปิดแผงด้วยลิงก์นี้แล้วลองล็อกอินอีกครั้ง: <a href="${origin}/">${origin}/</a></p>` +
+        `</body></html>`
+    );
+  }
+  return res.status(400).json({ error: "invalid state" });
+}
 
 authRouter.get("/discord/login", (_req, res) => {
   if (!config.DISCORD_CLIENT_ID || !config.DISCORD_REDIRECT_URI) {
@@ -55,7 +79,7 @@ authRouter.get("/discord/callback", async (req, res) => {
       requestId,
       payload: { detail: "callback without a login-generated state" },
     }).catch(() => {});
-    return res.status(400).json({ error: "invalid state" });
+    return stateErrorResponse(req, res);
   }
   const [stateValue, expiresAt] = expected.split(".");
   if (stateValue !== state || Number(expiresAt) < Date.now()) {
@@ -67,7 +91,7 @@ authRouter.get("/discord/callback", async (req, res) => {
       payload: { detail: "state mismatch or expired state on OAuth callback" },
     }).catch(() => {});
     res.clearCookie(AUTH_STATE_COOKIE);
-    return res.status(400).json({ error: "invalid state" });
+    return stateErrorResponse(req, res);
   }
   res.clearCookie(AUTH_STATE_COOKIE);
 

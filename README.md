@@ -171,6 +171,13 @@ browser clients. The player router overrides the global
 'none'`, no inline scripts/styles) so the panel is actually usable while
 the rest of the API stays locked down.
 
+> **OAuth host rule:** the Discord callback only accepts the exact host
+> registered as `DISCORD_REDIRECT_URI` (state cookies are host-bound), so
+> the canonical origin is baked into the page (`<meta name="rp:origin">`)
+> and the panel app JS auto-redirects there. Open the panel on
+> `http://localhost:8080/` (or whatever matches that env var) — typing
+> `127.0.0.1` still works, it just bounces you to `localhost` first.
+
 ## Admin web
 
 `GET /admin` serves a staff console (same embed-free pattern —
@@ -202,6 +209,9 @@ share it), and it only uses the relaxed WEB_CSP on its three asset routes.
 Two read-only list endpoints were added for it:
 `GET /admin/users` (`auth.manage`) and `GET /admin/characters`
 (`character.view`), both with `?query=`, `?limit=`, `?offset=`.
+The same canonical-origin auto-redirect as the player panel applies
+(OAuth state cookies only survive on the host registered as
+`DISCORD_REDIRECT_URI`).
 
 ## Inventory
 

@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { config } from "../config/index.js";
 
 /**
  * Player-facing web ("Player Web" in MASTER_PROMPT §6 architecture). A
@@ -21,11 +22,21 @@ export const WEB_CSP =
   "connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'self'; " +
   "form-action 'self'; frame-ancestors 'none'";
 
-const INDEX_HTML = `<!doctype html>
+// The Discord OAuth callback only accepts the exact host registered as
+// DISCORD_REDIRECT_URI (cookies are host-bound, so `/player` on 127.0.0.1
+// would mint a state cookie the callback at localhost never receives). Bake
+// that canonical origin into the page and have the app JS auto-jump to it,
+// so whatever loopback/alt host the user types, the login cookie matches.
+const CANONICAL_ORIGIN = config.DISCORD_REDIRECT_URI
+  ? new URL(config.DISCORD_REDIRECT_URI).origin
+  : "";
+
+const INDEX_HTML = (origin: string) => `<!doctype html>
 <html lang="th">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="rp:origin" content="${origin}">
 <title>RP Bedrock — Player Panel</title>
 <link rel="stylesheet" href="/player/app.css">
 </head>
@@ -79,6 +90,12 @@ const APP_JS = `
 (function () {
   "use strict";
   var app = document.getElementById("app");
+
+  var canonical = document.querySelector("meta[name=\\"rp:origin\\"]");
+  if (canonical && canonical.content && location.origin !== canonical.content) {
+    location.replace(canonical.content + location.pathname + location.search);
+    return;
+  }
 
   function el(html) {
     var d = document.createElement("div");
@@ -288,7 +305,7 @@ export const playerWebRouter = Router();
 
 playerWebRouter.get("/", (_req, res) => {
   res.setHeader("Content-Security-Policy", WEB_CSP);
-  res.type("html").send(INDEX_HTML);
+  res.type("html").send(INDEX_HTML(CANONICAL_ORIGIN));
 });
 
 playerWebRouter.get("/app.css", (_req, res) => {

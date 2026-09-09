@@ -7,6 +7,28 @@
   real infrastructure; a small set of infrastructure-dependent paths remains
   explicitly unverified (listed below under **Unverified**).
 
+## 2026-09-09 Round 4 — OAuth state host-mismatch fix + friendly error (HEAD; committed as the next commit)
+
+- **The first real-browser login attempt hit `{"error":"invalid state"}`**
+  (3 × `oauth_state_missing` in security_events, 16:26–16:27 local).
+  Cause confirmed from the events + `.env`: `DISCORD_REDIRECT_URI` is
+  `http://localhost:8080/...` but the panel was opened on
+  `127.0.0.1:8080` — the state cookie is host-bound, so Discord's callback
+  on `localhost` never received it. Neither branch is a bug on its own; the
+  two hosts just must match.
+- **Fix (prevents recurrence):** both panels now bake the canonical origin
+  (`DISCORD_REDIRECT_URI`'s origin) into the page via
+  `<meta name="rp:origin">`, and the panel app JS redirects there
+  immediately when `location.origin` differs — so opening `127.0.0.1`
+  bounces to `localhost` before any login attempt. Verified live: meta
+  present on both panels, both `app.js` still pass `node --check`.
+- **Friendly callback error:** `stateErrorResponse()` in `auth/routes.ts` —
+  a state-missing/mismatch callback now returns a readable Thai HTML page
+  (with the canonical `localhost` link) for `Accept: text/html` browsers,
+  and keeps the JSON `{"error":"invalid state"}` for API clients. The
+  security events (MEDIUM/HIGH, ip, requestId) still fire as before.
+- Suite stays **23/23**, build clean.
+
 ## 2026-09-09 Round 3 — admin web panel + web-JS escape fix (HEAD; committed as the next admin-web commit)
 
 - **Admin Web built** (MASTER_PROMPT §22, top Pending item):

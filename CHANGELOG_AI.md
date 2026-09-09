@@ -50,6 +50,67 @@
 ...
 
 ---
+## [2026-09-09 16:40] — AI: big-pickle (opencode) — OAuth state host-mismatch fix (127.0.0.1 vs localhost) + readable callback error
+
+### Task
+User's first real-browser login hit `{"error":"invalid state"}`. Diagnose
+and fix the state-cookie flow so the panels work regardless of the loopback
+host the user happens to open.
+
+### Changed
+- `backend/src/web/playerWeb.ts` + `backend/src/web/adminWeb.ts` — bake the
+  canonical origin (`DISCORD_REDIRECT_URI`'s origin) into the page via
+  `<meta name="rp:origin">`; panel app JS immediately redirects to it when
+  `location.origin` differs. Opening `http://127.0.0.1:8080/` now bounces to
+  `http://localhost:8080/` before any login attempt, so the state cookie is
+  always minted on the host Discord's callback will use.
+- `backend/src/modules/auth/routes.ts` — new `stateErrorResponse()`: a
+  state-missing/mismatched callback returns a readable Thai HTML page with
+  the canonical link for `Accept: text/html` (browser) clients; API clients
+  keep the machine `{"error":"invalid state"}`. Security events (missing /
+  mismatch, severity MEDIUM/HIGH) unchanged.
+- `README.md` — OAuth host rule callout on both panel sections.
+- `AI_HANDOFF.md` — Round 4 entry.
+
+### Why
+- Root cause: `DISCORD_REDIRECT_URI = http://localhost:8080/...` but the
+  panel was opened on `127.0.0.1:8080`. State is a host-bound cookie: minted
+  on 127.0.0.1, then Discord returns to `localhost` → cookie never arrives →
+  `oauth_state_missing` → "invalid state". Confirmed via
+  `security_events` (3 × `oauth_state_missing`, ip `::1`, 16:26–16:27).
+- Auto-redirect removes the failure mode instead of just documenting it; the
+  friendly error page covers direct callback hits.
+
+### Dependencies / Impact
+- Additive, no DB/migration/pack change. The auto-redirect runs in-app JS
+  before any network call.
+
+### Tests
+- [PASS] `npm run build` (tsc) clean.
+- [PASS] `npm test` — 23/23 unchanged.
+- [PASS] Live: both panels serve `<meta name="rp:origin" content="http://localhost:8080">`;
+  served `app.js` still passes `node --check` (escape convention kept);
+  callback with `Accept: text/html` + bad state → 400 with the Thai hint HTML.
+
+### Security
+- No weakening: the state check still requires a non-empty server-minted
+  value and still fires the MEDIUM/HIGH security events. The redirect only
+  moves the browser to the server's own configured origin (no data
+  exfiltration vector). API clients (JSON accept) unaffected.
+
+### Known Issues
+- Registering a non-loopback public origin for `DISCORD_REDIRECT_URI`
+  (production) makes the auto-redirect force staff browsers to that domain —
+  intended, since the OAuth callback only works there anyway.
+
+### Next Steps
+- User: re-test login on `http://localhost:8080/` (panel redirects there from
+  127.0.0.1 automatically now).
+
+### Handoff Notes
+- Committed together with the Round 3 admin-web work or as a follow-up —
+  see `git log`.
+
 ## [2026-09-09 16:10] — AI: big-pickle (opencode) — Admin web panel (MASTER_PROMPT §22) + web-JS escape fix
 
 ### Task

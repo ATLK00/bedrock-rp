@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { config } from "../config/index.js";
 import { WEB_CSP } from "./playerWeb.js";
 
 /**
@@ -16,17 +17,27 @@ import { WEB_CSP } from "./playerWeb.js";
  *   - security      security events + acknowledge
  *   - roles         role → permission matrix, grant / revoke for a user
  *
- * Auth: the page itself is 401-guarded like any admin route; every data
- * call re-runs the existing per-permission RBAC checks on the API side, so
- * the page never adds an authorization bypass. CSP override is scoped to
- * these routes only (same same-origin policy as the player panel).
+ * Auth: the page shell is served anonymously (static, no data, CSP-locked);
+ * the app JS boots into a Discord-login screen when the first API call 401s.
+ * Every data call re-runs the existing per-permission RBAC checks on the API
+ * side, so the page never adds an authorization bypass. CSP override is
+ * scoped to these routes only (same same-origin policy as the player panel).
  */
 
-const INDEX_HTML = `<!doctype html>
+// Same-disk canonical-origin trick as the player panel: the Discord OAuth
+// callback only accepts the exact host DISCORD_REDIRECT_URI registers
+// (cookies are host-bound), so the panel auto-jumps to that origin if the
+// user opened it via a different host (e.g. 127.0.0.1 vs localhost).
+const CANONICAL_ORIGIN = config.DISCORD_REDIRECT_URI
+  ? new URL(config.DISCORD_REDIRECT_URI).origin
+  : "";
+
+const INDEX_HTML = (origin: string) => `<!doctype html>
 <html lang="th">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="rp:origin" content="${origin}">
 <title>RP Bedrock — Admin</title>
 <link rel="stylesheet" href="/admin/app.css">
 </head>
@@ -91,6 +102,13 @@ const APP_JS = `
 (function () {
   "use strict";
   var app = document.getElementById("app");
+
+  var canonical = document.querySelector("meta[name=\\"rp:origin\\"]");
+  if (canonical && canonical.content && location.origin !== canonical.content) {
+    location.replace(canonical.content + location.pathname + location.search);
+    return;
+  }
+
   var TABS = ["overview", "users", "characters", "shop", "cases", "audit", "security", "roles"];
   var LABELS = { overview: "ภาพรวม", users: "ผู้เล่น", characters: "ตัวละคร",
     shop: "ร้านค้า", cases: "เคส", audit: "Audit", security: "Security", roles: "Roles" };
@@ -679,7 +697,7 @@ export const adminWebRouter = Router();
 
 adminWebRouter.get("/", (_req, res) => {
   res.setHeader("Content-Security-Policy", WEB_CSP);
-  res.type("html").send(INDEX_HTML);
+  res.type("html").send(INDEX_HTML(CANONICAL_ORIGIN));
 });
 
 adminWebRouter.get("/app.css", (_req, res) => {
