@@ -22,8 +22,56 @@ const ADMIN_DB_URL =
 const CI_REDIS_URL = process.env.CI_REDIS_URL || "redis://localhost:6379";
 const BDS_SECRET = "test-bridge-secret-0123456789abcdef";
 
+/** Resolve + connect-probe a service endpoint with backoff, so the suite
+ * never races away against a CI services block whose DNS/listeners are still
+ * warming up (which manifests as a transient EAI_AGAIN for the hostname). */
+async function waitForRedis(url: string, attempts = 30) {
+  for (let i = 0; i < attempts; i++) {
+    try {
+      const parsed = new URL(url);
+      const { lookup } = await import("node:dns/promises");
+      await lookup(parsed.hostname);
+      const { createClient } = await import("redis");
+      const client = createClient({ url });
+      client.on("error", () => {});
+      await client.connect().catch(() => {});
+      await client.ping().catch(() => {});
+      if (client.isOpen) {
+        await client.quit().catch(() => {});
+        return;
+      }
+      await client.quit().catch(() => {});
+    } catch {
+      // keep waiting
+    }
+    await new Promise((r) => setTimeout(r, 2000));
+  }
+  throw new Error(`timed out waiting for redis (${url})`);
+}
+
+async function waitForPostgres(url: string, attempts = 30) {
+  for (let i = 0; i < attempts; i++) {
+    try {
+      const parsed = new URL(url);
+      const { lookup } = await import("node:dns/promises");
+      await lookup(parsed.hostname);
+      const client = new pg.Client({ connectionString: url });
+      await client.connect();
+      await client.end();
+      return;
+    } catch {
+      await new Promise((r) => setTimeout(r, 2000));
+    }
+  }
+  throw new Error(`timed out waiting for postgres (${url})`);
+}
+
 /** Drop + recreate + migrate a clean `bedrock_rp_test`, controlling DATABASE_URL. */
 async function prepareTestDatabase() {
+  // Let the CI job's service DNS + listeners catch up before we race it.
+  await waitForPostgres(ADMIN_DB_URL);
+  await waitForRedis(CI_REDIS_URL);
+
   const admin = new pg.Client({ connectionString: ADMIN_DB_URL });
   await admin.connect();
   try {
