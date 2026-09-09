@@ -1,0 +1,67 @@
+name: bedrock-rp-prod
+
+# Production/staging deploy for the backend + its data stores.
+# Creata a secrets env file first: cp .env.prod.example .env  (then fill it).
+#   - copy `ops/.env.prod.example` -> `ops/.env`, set real secrets
+#   - `docker compose -f ops/docker-compose.prod.yml build`
+#   - one-time + on-upgrade: `docker compose -f ops/docker-compose.prod.yml run --rm backend node dist/db/migrate.js`
+#   - `docker compose -f ops/docker-compose.prod.yml up -d`
+# Backups: `ops/backup.sh`. Runbook: `ops/README.md`.
+#
+# Ports: postgres + redis are NOT published to the host by default (they are
+# only reachable inside the compose network). If you want to reach them from
+# the host (e.g. psql/pg_dump tooling), run the backup script instead, or add
+# an explicit `ports` mapping scoped to 127.0.0.1.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:?POSTGRES_USER not set} -d ${POSTGRES_DB:?POSTGRES_DB not set}"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+      start_period: 10s
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+      start_period: 5s
+
+  backend:
+    build:
+      context: ../backend
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      NODE_ENV: production
+      PORT: 8080
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 15s
+
+volumes:
+  pg_data:
+  redis_data:

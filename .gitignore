@@ -4,6 +4,7 @@ dist/
 *.log
 __pycache__/
 *.pyc
+ops/backups/
 # ad-hoc curl test payloads (throwaway, not fixtures)
 *_body.json
 grant_*.json

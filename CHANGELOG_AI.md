@@ -51,6 +51,100 @@
 
 ---
 
+## [2026-09-09 10:52] — AI: big-pickle (opencode) — Deploy/backup tooling (prod compose, Dockerfile, backup/restore verified)
+
+### Task
+Last roadmap item that could be built inside the repo: a reproducible
+production/staging deploy for the backend + data stores, and a real
+pg_dump/redis backup path with restore. CI dotfile and NBT tooling were the
+two previous items; this closes the ops gap.
+
+### Changed
+- `backend/Dockerfile` (new) — multi-stage, non-root user. Build stage runs
+  `npm ci` + `tsc`; runtime stage ships production deps (`npm ci --omit=dev`),
+  compiled `dist/`, and `migrations/` at the path `dist/db/migrate.js` expects
+  (`../../migrations`), so there is **no** `tsx`/TS source in the image and
+  migrations run as a one-shot via `node dist/db/migrate.js`.
+- `backend/.dockerignore` (new) — no node_modules/dist/.env in the build.
+- `ops/docker-compose.prod.yml` (new) — project name `bedrock-rp-prod` (won't
+  collide with the dev stack), postgres:16-alpine + redis:7-alpine with named
+  volume persistence and healthchecks, backend on host `8080:8080`, secrets via `ops/.env` (gitignored). DB + redis **not** published to the host (compose
+  network only). Redis has appendonly yes (everysec).
+- `ops/.env.prod.example` (new) — the single env file driving both compose
+  interpolation and the backend container (POSTGRES_*, DATABASE_URL/REDIS_URL
+  with compose service hostnames, BDS_BRIDGE_SECRET, DISCORD_*, JWT_SECRET,
+  TRUST_PROXY, CORS_ORIGINS, rate-limit/retention/ttl tunables).
+- `ops/backup.sh` (new) — timestamped `pg_dump --format=custom` + `redis-cli
+  SAVE`/`cat /data/dump.rdb` into `ops/backups/` (or `$BACKUP_DIR`), retention
+  prune (`$RETENTION_DAYS`, default 7). Sourced from `ops/.env` so it targets
+  the running stack's creds. Handles the Git-Bash/MSYS path-mangling pitfall
+  (`MSYS_NO_PATHCONV=1` scoped to the in-container redis path + relative
+  compose path) after discovering it live on Windows.
+- `ops/README.md` (new) — deploy runbook: prerequisites, first deploy (build →
+  migrate → up → health), pointing BDS at it (bridgeConfig/variables.json,
+  level.dat patcher note), reverse-proxy/TRUST_PROXY caveat, backups + cron +
+  restore, day-2 upgrade flow.
+- `README.md` — Layout lists ops/ as docker + deploy tooling; Known Issues
+  gain the deploy/backup-verified note.
+- `.gitignore` — `__pycache__/`, `*.pyc`, `ops/backups/`.
+
+### Why
+The backend foundation batch has been verified but never deployable — no
+Dockerfile, no prod compose, no backup path. Shipping a server requires all
+three; this makes the documented "deploy on a VPS" path actually reproducible
+and the data stores recoverable.
+
+### Tests
+- [PASS] `docker compose -f ops/docker-compose.prod.yml config` — interpolation
+  + service graph valid
+- [PASS] `docker compose build backend` — multi-stage image builds clean
+- [PASS] Full prod stack smoke on the local host (separate project, no dev
+  collision): postgres + redis healthy → `run --rm backend node
+  dist/db/migrate.js` applies all 24 migrations in the container → backend
+  healthy → `GET /health/live` + `/health/ready` (db+redis ok) → `/admin/roles`
+  401 (auth/limiter/middleware working in production mode)
+- [PASS] Empty `JWT_SECRET` fails fast at container boot with the zod message
+  (expected fail-fast, no silent misconfig)
+- [PASS] `ops/backup.sh` — produces valid custom-format pg dump (76,481 bytes)
+  + real RDB (`REDIS0012` magic); MSYS path-mangling bug found + fixed live
+- [PASS] `pg_restore` round-trip — restore into a throwaway DB yields all 25
+  tables, 24 `_migrations`, 3 seeded `items` rows; then dropped the test DB
+- [PASS] Full teardown `down -v` — prod volumes/network removed, dev stack
+  (5434/6379) untouched, throwaway test secret `.env` deleted
+- [PASS] `bash -n ops/backup.sh`
+
+### Security
+- Secrets are never in the repo: `ops/.env` is gitignored (template is
+  `ops/.env.prod.example`), the throwaway test `.env` (with a generated
+  `JWT_SECRET`) was deleted after the smoke.
+- Postgres + redis are not exposed on the host; backend listens on 8080 with
+  rate limiting keyed on client IP (set `TRUST_PROXY` correctly behind a real
+  reverse proxy).
+- Image runs as an unprivileged `app` user; no runtime tooling (psql, redis-cli
+  are host-side compose exec only, never installed into the backend image).
+
+### Known Issues
+- The prod compose is a Docker-on-the-same-host deployment; K8s/cloud-managed
+  DB is out of scope (documented).
+- The compose's `trust proxy` caveat stays: single trusted proxy verified in
+  an earlier round; multi-hop/load-balanced shapes still need a live check.
+- Live Discord OAuth is still user-confirmed only (2026-09-09), not
+  independently observed.
+
+### Next Steps
+- Inventory UI design decision, then player-facing.
+- Optional live curl check for "heartbeat after leave drops presence".
+- Push the repo to a remote so `.github/workflows/ci.yml` actually runs.
+
+### Handoff Notes
+- Runbook: `ops/README.md`. Migrations are a manual one-shot on upgrade; they
+  are not run at container boot.
+- The `ops/.env` I generated during the smoke for the prod stack contained a
+  throwaway JWT_SECRET and was deleted — operators must create their own from
+  `ops/.env.prod.example`.
+
+---
+
 ## [2026-09-09 10:33] — AI: big-pickle (opencode) — NBT patch automation + CI gate
 
 ### Task

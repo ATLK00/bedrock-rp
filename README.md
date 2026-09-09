@@ -59,7 +59,8 @@ behavior_pack/     BDS behavior pack — scripts run in-game, talk to backend ov
 resource_pack/     stub, empty until content work starts
 backend/           Node/TS service — owns DB, RBAC, economy ledger, audit log
 backend/migrations/ raw SQL, run in order, no ORM auto-migrate
-ops/               docker-compose for local dev (postgres + redis)
+ops/               docker + deploy tooling: dev compose (postgres + redis), prod
+                   compose, backup script, .env.prod.example, runbook
 docs/              MASTER_PROMPT.md (source of truth for rules), original prompt pack
 CHANGELOG_AI.md    every AI iteration appends an entry — never edit history
 AI_HANDOFF.md      current state for the next AI/session

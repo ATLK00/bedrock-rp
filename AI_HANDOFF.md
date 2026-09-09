@@ -179,13 +179,13 @@
 
 ## Pending (features/tooling not built yet — not blocked items)
 - Decide inventory size/UI approach before player-facing.
-- Deploy/backup tooling (staging/production compose or deployment pipeline; pg_dump/redis backup).
 - Complete a real Discord OAuth sign-in with a real app — the live sign-in
   (2026-09-09) is user-confirmed but was not independently observed in this env.
 
-> CI gate (build + `npm test` + level.dat self-check) and the `level.dat` NBT
-> patch automation are now DONE — see `.github/workflows/ci.yml` and
-> `tools/leveldat_patch.py`.
+> CI gate (build + `npm test` + level.dat self-check), the `level.dat` NBT
+> patch automation (`tools/leveldat_patch.py`), and deploy/backup tooling
+> (`ops/docker-compose.prod.yml`, `ops/backup.sh`, `ops/README.md`) are now
+> DONE.
 
 > Note: the `characters.xuid` rename is DONE (migration 015) — do not treat it
 > as pending. Historical CHANGELOG entries that mention it as pending are
@@ -229,8 +229,11 @@ unusable, purely for table hygiene. Mirrors the trade-expiry job's exact pattern
   first lines, em-dashes stored as `â€”`) from an early editing pass — comments
   only, harmless, left as-is to avoid churn.
 - Everything else unchanged from previous entries (rate limits in-memory/
-  `trust proxy` unconfigured, no deploy/backup tooling). The `level.dat` NBT
-  patch is now automated (`tools/leveldat_patch.py` with `--self-test`).
+  `trust proxy` unconfigured for prod). The `level.dat` NBT patch is now
+  automated (`tools/leveldat_patch.py` with `--self-test`) and deploy/backup
+  tooling exists (`ops/docker-compose.prod.yml` + `ops/backup.sh`, verified
+  end-to-end on the local host: build → migrate → healthy → backup →
+  pg_restore round-trip → down -v).
 
 ## Next Recommended Task
 Automated integration tests (20/20 on the real docker stack), the signed+BDS
@@ -238,12 +241,13 @@ pack, `trust proxy` (verified behind a real docker nginx), the backend
 foundation batch (character confirm/lock, multi-currency economy, containers,
 idempotency, cases, security center, OAuth state), the retention/rate-limit
 hardening round, the live BDS re-smoke on current HEAD (2026-09-09 rows), the
-CI gate (`.github/workflows/ci.yml`), and the `level.dat` NBT patch automation
-(`tools/leveldat_patch.py`) are all done. Remaining verified-gap: live Discord
-OAuth was user-confirmed (2026-09-09) but not independently observed in this
-environment; the "heartbeat-after-leave drops presence" drop is HTTP-suite
-covered and can be observed live with a documented curl check if desired.
-After those: deploy/backup tooling and inventory UI design.
+CI gate (`.github/workflows/ci.yml`), the `level.dat` NBT patch automation
+(`tools/leveldat_patch.py`), and deploy/backup tooling
+(`ops/docker-compose.prod.yml` + `ops/backup.sh`) are all done.
+Remaining verified-gap: live Discord OAuth was user-confirmed (2026-09-09)
+but not independently observed in this environment; the "heartbeat-after-leave
+drops presence" drop is HTTP-suite covered and can be observed live with a
+documented curl check if desired. After those: inventory UI design.
 
 ## Do Not Change
 - One Discord account = one character
