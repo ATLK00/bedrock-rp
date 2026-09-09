@@ -11,8 +11,15 @@ import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
 import pg from "pg";
 
-const TEST_DB_URL = "postgres://bedrock_rp:changeme@localhost:5434/bedrock_rp_test";
-const ADMIN_DB_URL = "postgres://bedrock_rp:changeme@localhost:5434/bedrock_rp";
+// Connection endpoints are host-port overridable so the same suite runs
+// against the local docker-compose stack (localhost:5434 / localhost:6379)
+// and a CI services block (which uses its own ports). CI_ variants fall back
+// to the local-dev defaults so nothing changes when run from `npm test`.
+const TEST_DB_URL =
+  process.env.CI_TEST_DB_URL || "postgres://bedrock_rp:changeme@localhost:5434/bedrock_rp_test";
+const ADMIN_DB_URL =
+  process.env.CI_ADMIN_DB_URL || "postgres://bedrock_rp:changeme@localhost:5434/bedrock_rp";
+const CI_REDIS_URL = process.env.CI_REDIS_URL || "redis://localhost:6379";
 const BDS_SECRET = "test-bridge-secret-0123456789abcdef";
 
 /** Drop + recreate + migrate a clean `bedrock_rp_test`, controlling DATABASE_URL. */
@@ -28,7 +35,7 @@ async function prepareTestDatabase() {
 
   process.env.NODE_ENV = "development";
   process.env.DATABASE_URL = TEST_DB_URL;
-  process.env.REDIS_URL = "redis://localhost:6379";
+  process.env.REDIS_URL = CI_REDIS_URL;
   process.env.BDS_BRIDGE_SECRET = BDS_SECRET;
   process.env.JWT_SECRET = "test-jwt-secret-0123456789abcdefghijklmnopqrstuv";
   // The suite legitimately fires far more than the default per-window

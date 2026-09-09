@@ -51,6 +51,80 @@
 
 ---
 
+## [2026-09-09 10:33] — AI: big-pickle (opencode) — NBT patch automation + CI gate
+
+### Task
+Complete the two roadmap items the user picked next (1-2 ต่อเลย): automate the
+manual `level.dat` NBT patch (Beta-APIs worlds) and add a CI gate so `npm run
+build` + the integration suite + the patcher self-check run on every push.
+
+### Changed
+- `tools/leveldat_patch.py` (new) — pure-stdlib, dependency-free in-place
+  patcher for a Bedrock BDS `level.dat`. Writes only the three top-level NBT
+  values (`MultiplayerGame`→1, `XBLBroadcastIntent`→0, `PlatformBroadcastIntent`→0),
+  leaving every other byte (nested compounds, custom data, footer) untouched.
+  Idempotent; refuses to write on missing/wrong-type fields (exit 3) or
+  unparseable input (exit 2); auto-detects little/big endian; writes a `.bak`
+  backup before patching (opt-out `--force`). `--check` / `--dry-run` modes and
+  a `--self-test` mode that round-trips a synthetic LE fixture (fields patched,
+  idempotent, nested same-named byte untouched, list skipped cleanly).
+- `.github/workflows/ci.yml` (new) — two jobs: `test` (Node 22, Postgres 16 +
+  Redis 7 service containers, `npm ci` → `npm run build` → `npm test` with the
+  CI endpoints via new `CI_TEST_DB_URL`/`CI_ADMIN_DB_URL`/`CI_REDIS_URL`) and
+  `nbt-patch` (runs `python3 tools/leveldat_patch.py --self-test`).
+- `README.md` — replaced the manual nbtlib instructions with the new tool's
+  usage (patch/check/dry-run) and exit-code contract.
+- `backend/src/test/integration.test.ts` — the db/redis endpoints are now
+  overridable via `CI_TEST_DB_URL`/`CI_ADMIN_DB_URL`/`CI_REDIS_URL` (defaults
+  unchanged, so local `npm test` behavior is identical).
+- `AI_HANDOFF.md` — Pending/Known Issues/Next Recommended Task updated (NBT
+  patch + CI gate moved from pending → done; deploy/backup tooling remains).
+
+### Why
+The Beta-APIs world setup was a fragile manual nbtlib step; automating it makes
+the documented workflow reproducible and adds a CI check so the tool can't
+silently rot. The CI gate catches build/TS and integration regressions on every
+commit without needing the author's local docker stack to be up.
+
+### Tests
+- [PASS] `npm run build` (tsc, exit 0) — local
+- [PASS] `npm test` — 20/20 integration suite, ~11s, against local docker stack
+  (Postgres 16 + Redis 7 already running as `ops-postgres-1` / `ops-redis-1`)
+- [PASS] `python tools\leveldat_patch.py --self-test` — synthetic LE fixture:
+  patched 3 fields, idempotent re-check, nested `MultiplayerGame` byte (7)
+  untouched
+- [PASS] edge cases: big-endian auto-detect + missing field → exit 3; corrupt
+  buffer → exit 2; missing arg → exit 4; main LE fixture end-to-end patch +
+  re-check all-ok + 245-byte length preserved
+
+### Security
+- No secrets added: DB creds in the workflow are the same dev-only
+  `bedrock_rp:changeme` already in `ops/docker-compose.yml`, used only against
+  CI service containers.
+- The patcher only mutates the three known NBT scalars in place; it never
+  parses-and-reserializes the whole file, so there's no risk of silently
+  corrupting/mangled custom world data.
+
+### Known Issues
+- Repo has no git remote yet — `.github/workflows/ci.yml` is ready but will
+  only run once the repo is pushed to a GitHub remote.
+- CI `test` job uses Node 22 (matches `@types/node ^22`); the earlier Node 24
+  bare-directory glob quirk doesn't affect it (npm test already uses the glob).
+
+### Next Steps
+- Deploy/backup tooling (staging/production compose, pg_dump + redis backup).
+- Inventory UI design decision, then player-facing.
+- Live Discord OAuth still only user-confirmed; optional live curl check for
+  "heartbeat after leave drops presence".
+
+### Handoff Notes
+- If the repo later gains a remote, no workflow edits are needed — the existing
+  `ci.yml` runs on push/PR to `master`.
+- `leveldat_patch.py` needs only Python 3 stdlib; the CI self-test job uses
+  `python3`.
+
+---
+
 ## [2026-09-09 03:43] — AI: big-pickle (opencode) — Retention jobs + edge tests + rate-limit bugfix
 
 ### Task

@@ -2,6 +2,8 @@ node_modules/
 dist/
 .env
 *.log
+__pycache__/
+*.pyc
 # ad-hoc curl test payloads (throwaway, not fixtures)
 *_body.json
 grant_*.json

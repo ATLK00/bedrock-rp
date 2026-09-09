@@ -110,7 +110,20 @@ NetherNet error before the connection even reaches the server. Patch
 these three NBT fields in `level.dat` to `1`, `0`, `0` respectively
 (matching a BDS-native world) before players can join. `level.dat` is
 binary NBT (little-endian, 8-byte header before the NBT payload) —
-Python's `nbtlib` package can read/write it.
+use `tools/leveldat_patch.py` (pure Python stdlib, no dependencies):
+
+```powershell
+python tools\leveldat_patch.py "path\to\world\level.dat"   # patches in place (writes a .bak)
+python tools\leveldat_patch.py "path\to\level.dat" --check # just report current values
+python tools\leveldat_patch.py "path\to\level.dat" --dry-run
+```
+
+The patcher rewrites only those three top-level values (leaving every other
+byte, including nested compounds and your custom world data, untouched), is
+idempotent (re-running on an already-patched file reports "ok" and does nothing),
+and refuses to write if any of the three fields is missing or of the wrong type
+(exit 3) or if the file isn't parseable NBT (exit 2). It auto-detects
+little/big endian. Exit 0 = patched or already correct.
 
 ## Auth flow
 

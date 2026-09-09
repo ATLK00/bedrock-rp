@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: build + migrate + integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: bedrock_rp
+          POSTGRES_PASSWORD: changeme
+          POSTGRES_DB: bedrock_rp
+        options: >-
+          --health-cmd "pg_isready -U bedrock_rp"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: backend
+        run: npm ci
+
+      - name: Build (TypeScript)
+        working-directory: backend
+        run: npm run build
+
+      - name: Integration suite (build + migrate + 20/20)
+        working-directory: backend
+        env:
+          CI_TEST_DB_URL: postgres://bedrock_rp:changeme@postgres:5432/bedrock_rp_test
+          CI_ADMIN_DB_URL: postgres://bedrock_rp:changeme@postgres:5432/bedrock_rp
+          CI_REDIS_URL: redis://redis:6379
+        run: npm test
+
+  nbt-patch:
+    name: leveldat_patch.py self-check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Run patcher self-check
+        run: |
+          python3 tools/leveldat_patch.py --self-test
