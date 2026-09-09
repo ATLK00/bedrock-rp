@@ -74,10 +74,10 @@ async function handleGive(player, deps, argv) {
     sendMsg(player, `§c${targetName} isn't online right now.`);
     return;
   }
-  if (actorPersistentId === targetPersistentId) {
-    sendMsg(player, "§cYou can't grant money to yourself in-game — use the site for that.");
-    return;
-  }
+  // Self-grant is intentionally allowed: the backend RBAC + audit already
+  // govern it (same as /admin/economy/grant), and staff legitimately need
+  // to fund their own character for setup/testing. Identity still comes
+  // from the actor's persistentId — no spoofing possible.
 
   const amountCents = Math.round(amount * 100);
   const result = await bridgeCall(deps.postToBackend, "/bridge/admin/give", {
