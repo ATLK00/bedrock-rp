@@ -682,6 +682,11 @@ const APP_JS = `
         "<a class=\\"btn primary\\" href=\\"/auth/discord/login\\">Login with Discord</a></div>";
       return;
     }
+    if (me.status === 403) {
+      app.innerHTML = "<div class=\\"card center\\"><h1>ไม่มีสิทธิ์เข้าถึง</h1>" +
+        "<p class=\\"err\\">บัญชีนี้ล็อกอินแล้วแต่ยังไม่มีสิทธิ์ดูแลระบบ (auth.manage)</p></div>";
+      return;
+    }
     renderShell();
   }
   boot();
