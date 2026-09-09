@@ -50,6 +50,37 @@
 ...
 
 ---
+## [2026-09-09 18:10] — AI: big-pickle (opencode) — `!deduct` in-game + allow self-grant
+
+### Task
+User hit the pack's self-grant refusal while live-testing `!give` ("can you
+grath money to yourself in-game"). Decision: self-grants ARE allowed (backend
+RBAC + audit govern them, same as `/admin/economy/grant`); added `!deduct` as
+the proven companion verb.
+
+### Changed
+- `behavior_pack/scripts/admin_commands.js` — removed the self-grant client
+  guard (replaced with a comment stating why it's allowed); added
+  `handleDeduct` + `!deduct <player> <amount> [currency]`.
+- `backend/src/modules/bridge/index.ts` — new `POST /bridge/admin/deduct`
+  (`InsufficientFundsError` → 409 "doesn't have that much to take"); the give
+  path was refactored into shared `parseMoneyVerbBody` / `authorizeStaffActor`
+  / `resolveTargetCharacter` helpers so both verbs share one implementation.
+- `backend/src/test/integration.test.ts` — deduct asserts inside the bridge
+  admin subtest: claw-back balance, over-deduct 409, non-staff 403 + HIGH
+  `staff_command_forbidden` (command=deduct). Suite stays 24/24.
+- `README.md` / `AI_HANDOFF.md` — documented `!deduct` + self-grant policy.
+
+### Security
+- `!deduct` uses the identical gate as `!give`: actor resolved by
+  persistentId → linked Discord user → RBAC `economy.grant`, deny = 403 +
+  HIGH security event. No new trust surface.
+
+### Known Issues
+- None new. (Unchanged: staff must be online/linked; pack changes need a BDS
+  redeploy + restart.)
+
+---
 ## [2026-09-09 17:55] — AI: big-pickle (opencode) — In-game staff command `!give` (bridge admin, RBAC on the actor) + CI infra fix (host-network docker)
 
 ### Task

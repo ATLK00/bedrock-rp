@@ -263,8 +263,15 @@ and is recorded as a HIGH `staff_command_forbidden` security event.
 - `!give <player> <amount> [cash|bank|red_money]` (permission `economy.grant`)
   → `POST /bridge/admin/give` `{actorName, actorPersistentId, targetName,
   targetPersistentId, amountCents, currency}` — grants money from the staff
-  player to an online player's wallet (mirrors `POST /admin/economy/grant`;
+  player to an online player's wallet (mirrors `POST /admin/economy.grant`;
   audited + ledgered). Unlinked actor/target → `404`.
+- `!deduct <player> <amount> [cash|bank|red_money]` (permission
+  `economy.grant`) → `POST /bridge/admin/deduct` — claw money back,
+  anti-negative (insufficient funds → `409`). Same auth/RBAC/audit path as
+  `!give`.
+
+Self-grants are allowed: the same RBAC + audit rules that govern
+`/admin/economy/grant` apply, so staff can fund their own character.
 
 ## Roles & permissions
 

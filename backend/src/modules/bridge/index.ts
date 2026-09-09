@@ -286,44 +286,34 @@ bridgeRouter.post("/inventory/move", async (req, res) => {
 const VALID_GRANT_CURRENCIES = new Set<economy.Currency>(["cash", "bank", "red_money"]);
 
 /**
- * Called when a staff player types `!give <player> <amount> [currency]` in
- * chat. `actor` is the staff member, `target` the player being granted money.
- * Both are resolved by persistentId (the only identity the pack has), never
- * by client-supplied character ids.
+ * Shared staff-command gate for bridge admin verbs. Resolves the actor's
+ * character by persistentId and re-checks RBAC server-side (the pack is never
+ * trusted to decide who may act). On any refusal it records a HIGH
+ * staff_command_forbidden security event and sends the HTTP response — the
+ * caller can tell because it returns null. Returns the authorized actor's
+ * own character + Discord userId on success.
  */
-bridgeRouter.post("/admin/give", async (req, res) => {
+async function authorizeStaffActor(params: {
+  req: any;
+  res: any;
+  logAction: string;
+  command: string;
+  actorName: string | null;
+  actorPersistentId: string | null;
+  targetName: string | null;
+  amountCents: number;
+  currency: string;
+}): Promise<{ actorCharacterId: number; actorUserId: number; actorName: string } | null> {
+  const { req, res, logAction, command, actorName, actorPersistentId, targetName, amountCents, currency } = params;
   const startedAt = Date.now();
-  const { actorName, actorPersistentId, targetName, targetPersistentId, amountCents, currency } = (req.body ?? {}) as {
-    actorName?: unknown;
-    actorPersistentId?: unknown;
-    targetName?: unknown;
-    targetPersistentId?: unknown;
-    amountCents?: unknown;
-    currency?: unknown;
-  };
-
-  const aName = isNonEmptyString(actorName) && actorName.length <= PLAYER_NAME_MAX ? actorName : null;
-  const aId = isNonEmptyString(actorPersistentId) && actorPersistentId.length <= MAX_IDENTIFIER_LENGTH ? actorPersistentId : null;
-  const tName = isNonEmptyString(targetName) && targetName.length <= PLAYER_NAME_MAX ? targetName : null;
-  const tId = isNonEmptyString(targetPersistentId) && targetPersistentId.length <= MAX_IDENTIFIER_LENGTH ? targetPersistentId : null;
-  const aCents = typeof amountCents === "number" && Number.isSafeInteger(amountCents) && amountCents > 0 ? amountCents : null;
-  const cur = currency === undefined || currency === null ? "cash" : String(currency);
-
-  if (!aName || !aId || !tName || !tId || aCents === null) {
-    logBridge("admin.give", req, startedAt, 400);
-    return res.status(400).json({ ok: false, message: "actor/target identity and a positive integer amount are required." });
-  }
-  if (!VALID_GRANT_CURRENCIES.has(cur as economy.Currency)) {
-    logBridge("admin.give", req, startedAt, 400);
-    return res.status(400).json({ ok: false, message: "currency must be cash, bank or red_money." });
-  }
 
   // The actor's own character — if this staff player is not linked to a
   // character, they can't be authorized to act as staff in-game.
-  const actorCharacter = await findCharacterByPersistentId(aId);
-  if (!actorCharacter) {
-    logBridge("admin.give", req, startedAt, 404);
-    return res.status(404).json({ ok: false, message: "Your Minecraft account isn't linked to a character — log in to the site and link it before using staff commands." });
+  const actorCharacter = actorPersistentId ? await findCharacterByPersistentId(actorPersistentId) : null;
+  if (!actorCharacter || !actorPersistentId) {
+    logBridge(logAction, req, startedAt, 404);
+    res.status(404).json({ ok: false, message: "Your Minecraft account isn't linked to a character — log in to the site and link it before using staff commands." });
+    return null;
   }
 
   // Server-side RBAC on the actor's Discord user. The pack only proves "this
@@ -336,32 +326,146 @@ bridgeRouter.post("/admin/give", async (req, res) => {
       actorUserId: actorCharacter.userId,
       targetType: "character",
       targetId: String(actorCharacter.id),
-      payload: { command: "give", actorName: aName, targetName: tName, amountCents: aCents, currency: cur },
+      payload: { command, actorName: actorName ?? null, targetName: targetName ?? null, amountCents, currency },
     });
-    logBridge("admin.give", req, startedAt, 403);
-    return res.status(403).json({ ok: false, message: "You don't have permission to grant money in-game." });
+    logBridge(logAction, req, startedAt, 403);
+    res.status(403).json({ ok: false, message: "You don't have permission to run staff commands in-game." });
+    return null;
   }
+  return { actorCharacterId: Number(actorCharacter.id), actorUserId: Number(actorCharacter.userId), actorName: actorName ?? "unknown" };
+}
 
-  const targetCharacter = await findCharacterByPersistentId(tId);
-  if (!targetCharacter) {
-    logBridge("admin.give", req, startedAt, 404);
-    return res.status(404).json({ ok: false, message: `${tName} isn't linked to a character on the server yet.` });
+/** Shared body validation for in-game money verbs (give/deduct). */
+function parseMoneyVerbBody(body: any, res: any, logAction: string, req: any) {
+  const { actorName, actorPersistentId, targetName, targetPersistentId, amountCents, currency } = (body ?? {}) as {
+    actorName?: unknown;
+    actorPersistentId?: unknown;
+    targetName?: unknown;
+    targetPersistentId?: unknown;
+    amountCents?: unknown;
+    currency?: unknown;
+  };
+  const aName = isNonEmptyString(actorName) && actorName.length <= PLAYER_NAME_MAX ? actorName : null;
+  const aId = isNonEmptyString(actorPersistentId) && actorPersistentId.length <= MAX_IDENTIFIER_LENGTH ? actorPersistentId : null;
+  const tName = isNonEmptyString(targetName) && targetName.length <= PLAYER_NAME_MAX ? targetName : null;
+  const tId = isNonEmptyString(targetPersistentId) && targetPersistentId.length <= MAX_IDENTIFIER_LENGTH ? targetPersistentId : null;
+  const aCents = typeof amountCents === "number" && Number.isSafeInteger(amountCents) && amountCents > 0 ? amountCents : null;
+  const cur = currency === undefined || currency === null ? "cash" : String(currency);
+
+  const fail = (message: string, status: number) => {
+    logBridge(logAction, req, Date.now(), status);
+    res.status(status).json({ ok: false, message });
+  };
+
+  if (!aName || !aId || !tName || !tId || aCents === null) {
+    fail("actor/target identity and a positive integer amount are required.", 400);
+    return null;
   }
+  if (!VALID_GRANT_CURRENCIES.has(cur as economy.Currency)) {
+    fail("currency must be cash, bank or red_money.", 400);
+    return null;
+  }
+  return { actorName: aName, actorPersistentId: aId, targetName: tName, targetPersistentId: tId, amountCents: aCents, currency: cur };
+}
+
+/** Shared target resolution for in-game money verbs. Returns the target character id or null (response already sent). */
+async function resolveTargetCharacter(params: {
+  targetPersistentId: string;
+  targetName: string;
+  res: any;
+  logAction: string;
+  req: any;
+}): Promise<{ targetCharacterId: number } | null> {
+  const { targetPersistentId, targetName, res, logAction, req } = params;
+  const targetCharacter = await findCharacterByPersistentId(targetPersistentId);
+  if (!targetCharacter) {
+    logBridge(logAction, req, Date.now(), 404);
+    res.status(404).json({ ok: false, message: `${targetName} isn't linked to a character on the server yet.` });
+    return null;
+  }
+  return { targetCharacterId: Number(targetCharacter.id) };
+}
+
+/**
+ * Called when a staff player types `!give <player> <amount> [currency]` in
+ * chat. `actor` is the staff member, `target` the player being granted money.
+ * Both are resolved by persistentId (the only identity the pack has), never
+ * by client-supplied character ids.
+ */
+bridgeRouter.post("/admin/give", async (req, res) => {
+  const startedAt = Date.now();
+  const parsed = parseMoneyVerbBody(req.body, res, "admin.give", req);
+  if (!parsed) return;
+
+  const actor = await authorizeStaffActor({
+    req, res, logAction: "admin.give", command: "give",
+    actorName: parsed.actorName, actorPersistentId: parsed.actorPersistentId,
+    targetName: parsed.targetName, amountCents: parsed.amountCents, currency: parsed.currency,
+  });
+  if (!actor) return;
+
+  const target = await resolveTargetCharacter({
+    targetPersistentId: parsed.targetPersistentId, targetName: parsed.targetName, res, logAction: "admin.give", req,
+  });
+  if (!target) return;
 
   try {
     await economy.grant({
-      characterId: targetCharacter.id,
-      amountCents: aCents,
-      reason: `in-game grant by ${aName}`,
-      actorUserId: actorCharacter.userId,
-      currency: cur as economy.Currency,
+      characterId: target.targetCharacterId,
+      amountCents: parsed.amountCents,
+      reason: `in-game grant by ${actor.actorName}`,
+      actorUserId: actor.actorUserId,
+      currency: parsed.currency as economy.Currency,
       requestId: (req as unknown as { requestId?: string }).requestId ?? null,
     });
     logBridge("admin.give", req, startedAt, 200);
-    return res.json({ ok: true, message: `Given ${aCents / 100} ${cur} to ${tName}.` });
+    return res.json({ ok: true, message: `Given ${parsed.amountCents / 100} ${parsed.currency} to ${parsed.targetName}.` });
   } catch (err: any) {
     console.error("[bridge] admin give failed", err);
     logBridge("admin.give", req, startedAt, 500);
     return res.status(500).json({ ok: false, message: "Something went wrong granting money. Try again." });
+  }
+});
+
+/**
+ * `!deduct` — claw money back from an online player (anti-negative enforced
+ * inside economy.deduct; insufficient funds → 409 to the actor).
+ */
+bridgeRouter.post("/admin/deduct", async (req, res) => {
+  const startedAt = Date.now();
+  const parsed = parseMoneyVerbBody(req.body, res, "admin.deduct", req);
+  if (!parsed) return;
+
+  const actor = await authorizeStaffActor({
+    req, res, logAction: "admin.deduct", command: "deduct",
+    actorName: parsed.actorName, actorPersistentId: parsed.actorPersistentId,
+    targetName: parsed.targetName, amountCents: parsed.amountCents, currency: parsed.currency,
+  });
+  if (!actor) return;
+
+  const target = await resolveTargetCharacter({
+    targetPersistentId: parsed.targetPersistentId, targetName: parsed.targetName, res, logAction: "admin.deduct", req,
+  });
+  if (!target) return;
+
+  try {
+    await economy.deduct({
+      characterId: target.targetCharacterId,
+      amountCents: parsed.amountCents,
+      reason: `in-game deduct by ${actor.actorName}`,
+      actorUserId: actor.actorUserId,
+      currency: parsed.currency as economy.Currency,
+      requestId: (req as unknown as { requestId?: string }).requestId ?? null,
+    });
+    logBridge("admin.deduct", req, startedAt, 200);
+    return res.json({ ok: true, message: `Deducted ${parsed.amountCents / 100} ${parsed.currency} from ${parsed.targetName}.` });
+  } catch (err: any) {
+    if (err instanceof economy.InsufficientFundsError) {
+      logBridge("admin.deduct", req, startedAt, 409);
+      return res.status(409).json({ ok: false, message: `${parsed.targetName} doesn't have that much to take.` });
+    }
+    console.error("[bridge] admin deduct failed", err);
+    logBridge("admin.deduct", req, startedAt, 500);
+    return res.status(500).json({ ok: false, message: "Something went wrong deducting money. Try again." });
   }
 });

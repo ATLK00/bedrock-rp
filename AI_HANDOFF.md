@@ -7,6 +7,21 @@
   real infrastructure; a small set of infrastructure-dependent paths remains
   explicitly unverified (listed below under **Unverified**).
 
+## 2026-09-09 Round 7 — `!deduct` in-game (mirror of `!give`) + allow self-grant
+
+- User tested `!give` live and hit the pack's self-grant refusal ("can you
+  grath money to yourself in-game"). Removed that client-side guard: backend
+  RBAC + audit already govern self-grants exactly like `/admin/economy/grant`,
+  and staff legitimately fund their own character for setup/testing.
+- Added `!deduct <player> <amount> [currency]` — the proven `!give` pattern
+  factored into three shared backend helpers (`parseMoneyVerbBody`,
+  `authorizeStaffActor`, `resolveTargetCharacter`) so give/deduct share one
+  implementation path: same RBAC (`economy.grant`), same HIGH
+  `staff_command_forbidden` event on deny, `InsufficientFundsError` → 409
+  (no overdraft). Pack side: `handleDeduct` mirrors `handleGive`.
+- Suite stays **24/24** (deduct asserts added to the bridge admin give
+  subtest: claw-back balance change, over-deduct 409, non-staff 403 + event).
+
 ## 2026-09-09 Round 6 — in-game staff command `!give` (authorized on the actor's identity via RBAC)
 
 - User's "จัดมา" led here after the admin web + CI were green. The gap:

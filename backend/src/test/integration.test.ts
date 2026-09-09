@@ -1054,6 +1054,37 @@ test("integration suite", async (t) => {
       amountCents: 100,
     });
     assert.equal(missingTarget.status, 404);
+
+    // !deduct mirror (same auth, same RBAC) — claw back cash
+    const deduct = await bridgePost("/bridge/admin/deduct", {
+      actorName: "Alice", actorPersistentId: "p-A",
+      targetName: "Gwen", targetPersistentId: "p-G",
+      amountCents: 50000, currency: "cash",
+    });
+    assert.equal(deduct.status, 200);
+    assert.equal((await deduct.json()).ok, true);
+    assert.equal(await wallet(), 75000); // 125000 - 50000
+
+    // over-deduct -> 409 (insufficient funds, no overdraft)
+    const overDeduct = await bridgePost("/bridge/admin/deduct", {
+      actorName: "Alice", actorPersistentId: "p-A",
+      targetName: "Gwen", targetPersistentId: "p-G",
+      amountCents: 999999999, currency: "cash",
+    });
+    assert.equal(overDeduct.status, 409);
+
+    // non-staff deduct also refused + raises a security event (command=deduct)
+    const deductDenied = await bridgePost("/bridge/admin/deduct", {
+      actorName: "Fred", actorPersistentId: "p-F",
+      targetName: "Gwen", targetPersistentId: "p-G",
+      amountCents: 100, currency: "cash",
+    });
+    assert.equal(deductDenied.status, 403);
+    const sec2 = await (await getAs("/admin/security/events?severity=HIGH", ctx.tokenA)).json();
+    assert.ok(
+      sec2.events.some((e: any) => e.event_type === "staff_command_forbidden" && e.payload?.command === "deduct"),
+      "deduct attempt by non-staff must raise a HIGH security event"
+    );
   });
 
   // 14. cases: create / staff resolve / messages / permission
