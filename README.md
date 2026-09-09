@@ -171,6 +171,38 @@ browser clients. The player router overrides the global
 'none'`, no inline scripts/styles) so the panel is actually usable while
 the rest of the API stays locked down.
 
+## Admin web
+
+`GET /admin` serves a staff console (same embed-free pattern —
+`backend/src/web/adminWeb.ts`, no static dir, no build step). It is shallow
+sugar over the existing RBAC-guarded `/admin/*` JSON routes: the page shell is
+served anonymously (static, no data, CSP-locked) and boot in the browser; if the
+first API call 401s, the panel shows a Discord login screen. Every data read or
+write still hits `sessionMiddleware` + per-route permission checks, so this is
+authorization-faithful, not a bypass.
+
+Tabs:
+
+- **Overview** — online players (`GET /admin/presence/online`), one-click
+  session-cleanup and trade-expiry job triggers (`sessions/cleanup-check`,
+  `trades/expire-check`)
+- **Users** — search (`?query=`), ban/unban, role matrix
+- **Characters** — search, whitelist toggle, fallback details edit, wallet
+  summary + `economy/grant`/`deduct`, inventory give/remove
+- **Shop** — listing load / upsert (`POST /admin/shop/listing`) / remove
+- **Cases** — list by status, detail thread, staff replies, status changes
+- **Audit** — action-filtered audit log
+- **Security** — severity/unacknowledged filter, ack on double-click
+- **Roles** — role list with permissions, grant/revoke by user id
+
+It's mounted *before* the rate-limited admin router in `app.ts`
+(`/admin` assets bypass the 60/min limiter; the data calls underneath still
+share it), and it only uses the relaxed WEB_CSP on its three asset routes.
+
+Two read-only list endpoints were added for it:
+`GET /admin/users` (`auth.manage`) and `GET /admin/characters`
+(`character.view`), both with `?query=`, `?limit=`, `?offset=`.
+
 ## Inventory
 
 - `POST /admin/inventory/give` `{characterId, itemId, quantity}` — admin-only, audited, stacks onto existing slots up to `max_stack` then fills empty slots, throws `409` if there's no room left

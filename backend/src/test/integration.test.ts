@@ -1210,6 +1210,46 @@ test("integration suite", async (t) => {
     assert.equal((js.headers.get("content-type") || "").includes("javascript"), true);
   });
 
+  // 21. admin web: page + assets + new read-only list endpoints
+  await t.test("admin web: page + assets + list endpoints", async () => {
+    // anonymous gets the static shell (no data); JS shows the login screen
+    const anon = await get("/admin");
+    assert.equal(anon.status, 200);
+    assert.equal((anon.headers.get("content-type") || "").includes("text/html"), true);
+
+    const page = await getAs("/admin", ctx.tokenA);
+    assert.equal(page.status, 200);
+    assert.equal((page.headers.get("content-type") || "").includes("text/html"), true);
+    const csp = page.headers.get("content-security-policy") || "";
+    assert.ok(csp.includes("default-src 'self'"));
+    assert.ok(csp.includes("frame-ancestors 'none'"));
+
+    const css = await getAs("/admin/app.css", ctx.tokenA);
+    assert.equal(css.status, 200);
+    assert.equal((css.headers.get("content-type") || "").includes("text/css"), true);
+
+    const js = await getAs("/admin/app.js", ctx.tokenA);
+    assert.equal(js.status, 200);
+    assert.equal((js.headers.get("content-type") || "").includes("javascript"), true);
+
+    // new read-only directories: users + characters
+    const users = await (await getAs("/admin/users", ctx.tokenA)).json();
+    assert.ok(Array.isArray(users.users), "users list is an array");
+    assert.ok(users.users.some((u: any) => Number(u.id) === Number(ctx.userA.id)), "seeded user visible");
+
+    const chars = await (await getAs("/admin/characters", ctx.tokenA)).json();
+    assert.ok(Array.isArray(chars.characters), "characters list is an array");
+    assert.ok(chars.characters.some((c: any) => c.name === "Alice"), "created character visible");
+
+    // search narrows results
+    const filtered = await (await getAs("/admin/characters?query=Alice", ctx.tokenA)).json();
+    assert.ok(filtered.characters.every((c: any) => c.name.indexOf("Alice") >= 0));
+
+    // non-owner (tokenB) cannot read admin directories
+    const denied = await getAs("/admin/users", ctx.tokenB);
+    assert.equal(denied.status, 403);
+  });
+
   // cleanup
   await new Promise<void>((resolve) => ctx.server.close(() => resolve()));
   await pool.end();

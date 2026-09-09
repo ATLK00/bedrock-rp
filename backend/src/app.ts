@@ -12,6 +12,7 @@ import { casesRouter } from "./modules/cases/routes.js";
 import { inventoryRouter } from "./modules/inventory/routes.js";
 import { authLimiter, bridgeLimiter, adminLimiter } from "./middleware/rateLimit.js";
 import { playerWebRouter } from "./web/playerWeb.js";
+import { adminWebRouter } from "./web/adminWeb.js";
 import { requestLogger } from "./middleware/logging.js";
 import { securityHeaders, cors, jsonParseError } from "./middleware/security.js";
 import { verifyBridgeSignature, BridgeSignatureError } from "./modules/bridge/signature.js";
@@ -131,6 +132,11 @@ export function createApp(): express.Express {
   app.use("/cases", adminLimiter, casesRouter);
   app.use("/inventories", adminLimiter, inventoryRouter);
   app.use("/bridge", bridgeLimiter, bridgeRouter);
+
+  // Admin console (static SPA) mounted BEFORE the rate-limited adminRouter so
+  // the page/assets bypass the limiter; every data call still hits the
+  // limited + RBAC-guarded /admin JSON routes below.
+  app.use("/admin", adminWebRouter);
   app.use("/admin", adminLimiter, adminRouter);
 
   // Player-facing web. Mounted after the JSON/routers (same-origin, no

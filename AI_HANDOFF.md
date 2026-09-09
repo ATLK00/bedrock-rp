@@ -7,6 +7,41 @@
   real infrastructure; a small set of infrastructure-dependent paths remains
   explicitly unverified (listed below under **Unverified**).
 
+## 2026-09-09 Round 3 — admin web panel + web-JS escape fix (HEAD; committed as the next admin-web commit)
+
+- **Admin Web built** (MASTER_PROMPT §22, top Pending item):
+  `backend/src/web/adminWeb.ts` serves `GET /admin`, `/admin/app.css`,
+  `/admin/app.js` (embed-free, same pattern as the player panel, shared
+  `WEB_CSP`). Tabs: overview (presence + cleanup-check/expire-check), users
+  (search/ban/unban/roles), characters (whitelist, details, wallet
+  grant/deduct, inventory give/remove), shop listing, cases thread/reply/
+  status, audit filter, security feed+ack, roles matrix.
+- Page shell is **served anonymously** (static, no data, CSP-locked, app JS
+  boots to a Discord-login screen on the first 401) — consistent with the
+  player panel; every data call still hits RBAC + rate-limit through the
+  existing admin router. Mounted in `app.ts` BEFORE the rate-limited
+  `adminRouter` so assets bypass the 60/min limiter while the JSON routes it
+  calls keep sharing it.
+- Two new read-only admin list endpoints the UI consumes:
+  `GET /admin/users` (`auth.manage`) and `GET /admin/characters`
+  (`character.view`), both with `?query=`, `?limit=`, `?offset=`.
+- **Bug found via `node --check` on the live-served JS** (HTTP tests can't
+  catch it): `\"` inside the TS template literals emitted a bare `"` to the
+  browser, breaking the injected JS in BOTH panels (player and admin) at
+  runtime. Fixed by emitting `\\"` so the served output keeps the escaped
+  quotes. The player web shipped this bug in `ee21dd4`; this round fixes it.
+  Now `node --check` passes on `/admin/app.js` AND `/player/app.js` exactly as
+  served by the live server, and UTF-8 Thai strings in both panels were
+  verified intact in the served bytes.
+- Suite 21 → **23/23 PASS** (new test: `admin web: page + assets + list
+  endpoints` — anonymous shell 200, assets serve correct MIME, list endpoints
+  return data + narrow on `?query=`, wrong-permission user gets 403). The
+  prior "anonymous /admin → 401" assertion was changed to 200: the shell is
+  static/gated nowhere, only the data behind it is.
+- Verification: `npm run build` clean; live on port 8080 — `/admin` 200
+  text/html + WEB_CSP header, `/admin/app.js` 200 application/javascript
+  (`node --check` clean), anonymous `/admin/users` → 401 JSON.
+
 ## 2026-09-09 Round — backend foundation batch (big-pickle/opencode)
 - Applied migrations **001–024** (new: `018_character_details`, `019_audit_columns`,
   `020_inventory_weight`, `021_economy_currencies`, `022_idempotency`, `023_security_events`,
@@ -200,8 +235,9 @@
 > CI gate (build + `npm test` + level.dat self-check), the `level.dat` NBT
 > patch automation (`tools/leveldat_patch.py`), deploy/backup tooling
 > (`ops/docker-compose.prod.yml`, `ops/backup.sh`, `ops/README.md`), the
-> in-game inventory UI (`!inv` + bridge inventory endpoints), and the player
-> web panel (`GET /player`, 22-test suite) are now DONE.
+> in-game inventory UI (`!inv` + bridge inventory endpoints), the player web
+> panel (`GET /player`, 22-test suite), and the admin web panel
+> (`GET /admin`, 23-test suite) are now DONE.
 
 > Note: the `characters.xuid` rename is DONE (migration 015) — do not treat it
 > as pending. Historical CHANGELOG entries that mention it as pending are
@@ -264,28 +300,30 @@ unusable, purely for table hygiene. Mirrors the trade-expiry job's exact pattern
   behavior pack (`!inv` via `@minecraft/server-ui`) over two new signed
   bridge endpoints (`/bridge/inventory/view`, `/bridge/inventory/move`) —
   identity is the persistentId, containers are ownership-checked (403 on
-  someone else's), all covered by the integration suite (now 21 tests).
+  someone else's), all covered by the integration suite (now 23 tests).
 
 ## Next Recommended Task
-Automated integration tests (21/21 on the real docker stack), the signed+BDS
+Automated integration tests (23/23 on the real docker stack), the signed+BDS
 pack, `trust proxy` (verified behind a real docker nginx), the backend
 foundation batch (character confirm/lock, multi-currency economy, containers,
 idempotency, cases, security center, OAuth state), the retention/rate-limit
 hardening round, the live BDS re-smoke on current HEAD (2026-09-09 rows), the
 CI gate (`.github/workflows/ci.yml`), the `level.dat` NBT patch automation
 (`tools/leveldat_patch.py`), deploy/backup tooling
-(`ops/docker-compose.prod.yml` + `ops/backup.sh`), and the in-game inventory
-UI (verified live on BDS 1.26.45.1: `!inv` + compass trigger + spawn link
-form + `@minecraft/server-chat` finding), and the player web panel
-(`GET /player`: Discord login → character → link-code → wallet/inventory,
-22-test suite) are all done.
-Remaining verified-gap: live Discord OAuth was user-confirmed (2026-09-09)
-but not independently observed in this environment; the "heartbeat-after-leave
-drops presence" drop is HTTP-suite covered and can be observed live with a
-documented curl check if desired; the player web panel is covered by the
-integration suite but hasn't had a real-browser pass yet (quick check on the
-live server: open `http://<host>:8080/` in a browser). After those: the
-vanilla-36-slot-size confirmation against the real world.
+(`ops/docker-compose.prod.yml` + `ops/backup.sh`), the in-game inventory UI
+(verified live on BDS 1.26.45.1: `!inv` + compass trigger + spawn link form +
+`@minecraft/server-chat` finding), the player web panel
+(`GET /player` ..., 22-test suite), and the **admin web panel** (`GET /admin`,
+23-test suite, MASTER_PROMPT §22) are all done.
+Remaining verified-gaps: real-browser passes of `/admin` and `/player` (open
+`http://<host>:8080/` in a browser — both serve valid now, incl. a local
+`node --check` syntax pass on the served JS); live Discord OAuth was
+user-confirmed (2026-09-09) but not independently observed; the
+"heartbeat-after-leave drops presence" drop is HTTP-suite covered and can be
+observed live with a documented curl check; the compass `itemUse` trigger caveat
+and the vanilla-36-slot-size confirmation both still need a real client. Push/C
+I is blocked on a git remote — none is configured and no `gh` CLI is installed;
+run `git remote add origin <url>` / user-creates the repo to unblock CI.
 
 ## Do Not Change
 - One Discord account = one character

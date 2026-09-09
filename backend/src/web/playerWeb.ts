@@ -16,7 +16,7 @@ import { Router } from "express";
  * /character/inventory, /inventories...) — no new data surface is added.
  */
 
-const PLAYER_CSP =
+export const WEB_CSP =
   "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; " +
   "connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'self'; " +
   "form-action 'self'; frame-ancestors 'none'";
@@ -218,7 +218,7 @@ const APP_JS = `
     var rows = (d.transactions || []).map(function (t) {
       var sign = Number(t.amount_cents) >= 0 ? "+" : "";
       return "<tr><td>" + esc(t.reason || "-") + "</td><td>" +
-        esc(t.ref_type || "-") + "</td><td class=\"muted\">" + fmtDate(t.created_at) +
+        esc(t.ref_type || "-") + "</td><td class=\\"muted\\">" + fmtDate(t.created_at) +
         "</td><td>" + sign + money(t.amount_cents) + "</td></tr>";
     }).join("");
     card.innerHTML =
@@ -276,7 +276,7 @@ const APP_JS = `
     var me = await api("/character");
     if (me.status === 401) { loginScreen(); return; }
     if (me.status === 404) { createScreen(); return; }
-    if (!me.ok) { setApp(el("<div class=\"card center\"><h1>Error</h1><p class=\"err\">" + esc((me.data && me.data.error) || "failure") + "</p></div>")); return; }
+    if (!me.ok) { setApp(el("<div class=\\"card center\\"><h1>Error</h1><p class=\\"err\\">" + esc((me.data && me.data.error) || "failure") + "</p></div>")); return; }
     renderDashboard(me.data);
   }
 
@@ -287,16 +287,16 @@ const APP_JS = `
 export const playerWebRouter = Router();
 
 playerWebRouter.get("/", (_req, res) => {
-  res.setHeader("Content-Security-Policy", PLAYER_CSP);
+  res.setHeader("Content-Security-Policy", WEB_CSP);
   res.type("html").send(INDEX_HTML);
 });
 
 playerWebRouter.get("/app.css", (_req, res) => {
-  res.setHeader("Content-Security-Policy", PLAYER_CSP);
+  res.setHeader("Content-Security-Policy", WEB_CSP);
   res.type("css").send(APP_CSS);
 });
 
 playerWebRouter.get("/app.js", (_req, res) => {
-  res.setHeader("Content-Security-Policy", PLAYER_CSP);
+  res.setHeader("Content-Security-Policy", WEB_CSP);
   res.type("js").send(APP_JS);
 });

@@ -50,6 +50,81 @@
 ...
 
 ---
+## [2026-09-09 16:10] — AI: big-pickle (opencode) — Admin web panel (MASTER_PROMPT §22) + web-JS escape fix
+
+### Task
+Build the staff console greenlit implicitly by "อันไหนควรทำจัดมาเลย" — the
+Admin Web from MASTER_PROMPT §22 — as a thin SPA over the existing RBAC/admin
+routes, plus fix a real bug the new verification step caught in both web
+panels.
+
+### Changed
+- `backend/src/web/adminWeb.ts` — NEW. Same embed-free pattern as the player
+  panel: `GET /admin`, `/admin/app.css`, `/admin/app.js` under the shared
+  `WEB_CSP`. Tabs: overview (presence/online + cleanup-check/expire-check
+  triggers), users (search, ban/unban, role grant/revoke), characters
+  (search, whitelist toggle, details, wallet grant/deduct, inventory
+  give/remove), shop (listing load/upsert/remove), cases (list by status,
+  detail thread, replies, status change), audit (action filter), security
+  (severity/ack filters, ack on double-click), roles (permission matrix).
+- `backend/src/app.ts` — mount the admin web router BEFORE the rate-limited
+  admin router so the shell+assets bypass the 60/min limiter while every
+  underline data call keeps hitting RBAC + the limiter.
+- `backend/src/modules/admin/index.ts` — add read-only list endpoints the UI
+  needs (previously absent): `GET /admin/users` (`auth.manage`) and
+  `GET /admin/characters` (`character.view`), both `?query=`/`?limit=`/`?offset=`.
+- `backend/src/web/playerWeb.ts` AND `adminWeb.ts` — fix escaped quotes in the
+  embedded JS (`\"` → `\\"`).
+- `backend/src/test/integration.test.ts` — test #21 (`admin web: page + assets
+  + list endpoints`); split the old admin-web page assertion so the anonymous
+  shell is now expected to serve 200 (UX: show a login screen via JS instead
+  of a bare JSON 401) while the data endpoints still 401/403.
+- `README.md` — new "Admin web" section; `AI_HANDOFF.md` — Round 3 entry,
+  suite counts 21 → 23, Next Recommended Task, done-list.
+
+### Why
+- Every administrative action had JSON-only coverage, so "admin" meant
+  curl/Postman against `backend/src/modules/admin/index.ts`. The panel is
+  shallow sugar: it never re-implements permissions, it just renders the same
+  response shapes the routes already return.
+- The `\"` fix is a correctness bug the HTTP tests can't see: template-literal
+  escapes `\"` emit a bare `"` to the browser, so BOTH panels' injected JS was
+  broken at runtime (caught only by `node --check` against the live-served
+  files). The player web shipped this in `ee21dd4`; this round fixes it there too.
+
+### Dependencies / Impact
+- Additive: 1 new router (+3 routes), 2 read-only admin endpoints, 1 mount
+  order in `app.ts`. No DB change, no migration, no behavior-pack change.
+
+### Tests
+- [PASS] `npm run build` (tsc) clean.
+- [PASS] `npm test` — 23/23: existing 22 + new "admin web: page + assets +
+  list endpoints" (anonymous shell 200; assets serve correct MIME; list
+  endpoints return data and narrow on `?query=`; wrong-permission user 403).
+- [FAIL→FIX] `node --check` on `/admin/app.js` and `/player/app.js` served by
+  the live server failed on bare `"` from the `\"` template escapes — fixed to
+  `\\"`, re-ran: both pass. UTF-8 Thai strings verified intact in served bytes.
+
+### Security
+- The anonymous page shell ships zero data and is CSP-locked with
+  `frame-ancestors 'none'`; the JS boots to a Discord-login screen on the
+  first 401. All reads/writes still pass `sessionMiddleware` + per-route RBAC
+  + the admin rate-limiter on the JSON routes the panel calls.
+- The new list endpoints are read-only and permission-gated
+  (`auth.manage` / `character.view`).
+
+### Known Issues
+- No real-browser pass yet for either panel (server-side valid: `node --check`
+  clean on served JS). Open `http://<host>:8080/admin` and `/` to confirm.
+
+### Next Steps
+- Real-browser pass of `/admin` + `/player`; push repo remote to run CI.
+- Compass `itemUse` trigger + vanilla 36-slot confirm need a live client.
+
+### Handoff Notes
+- Same serve-only-life as the player panel: ships in the backend process, so
+  the live host node on port 8080 already serves `/admin` after reload.
+
 ## [2026-09-09 15:43] — AI: big-pickle (opencode) — Player web panel (Discord login → character → link-code → wallet/inventory)
 
 ### Task

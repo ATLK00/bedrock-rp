@@ -187,6 +187,59 @@ adminRouter.get("/users/:id/roles", requirePermission("rbac.manage_roles"), asyn
 });
 
 /**
+ * Read-only: paged user directory for staff (player management). Search
+ * matches discord_tag / discord_id / character name. Includes each user's
+ * roles and their (single) character reference in one pass.
+ */
+adminRouter.get("/users", requirePermission("auth.manage"), async (req, res) => {
+  const query = typeof req.query.query === "string" ? req.query.query.trim() : null;
+  const limit = Math.max(1, Math.min(Number(req.query.limit) || 50, 200));
+  const offset = Math.max(0, Number(req.query.offset) || 0);
+  const { rows } = await pool.query(
+    `SELECT
+       u.id, u.discord_id, u.discord_tag, u.is_banned, u.ban_reason,
+       u.created_at, u.last_login_at,
+       COALESCE(array_agg(DISTINCT r.name) FILTER (WHERE r.name IS NOT NULL), '{}') AS roles,
+       c.id AS character_id, c.name AS character_name,
+       c.persistent_id IS NOT NULL AS linked,
+       c.is_deleted AS character_deleted
+     FROM users u
+     LEFT JOIN user_roles ur ON ur.user_id = u.id
+     LEFT JOIN roles r ON r.id = ur.role_id
+     LEFT JOIN characters c ON c.user_id = u.id
+     WHERE ($1::text IS NULL OR u.discord_tag ILIKE '%' || $1 || '%'
+        OR u.discord_id ILIKE '%' || $1 || '%' OR c.name ILIKE '%' || $1 || '%')
+     GROUP BY u.id, c.id
+     ORDER BY u.id DESC
+     LIMIT $2 OFFSET $3`,
+    [query, limit, offset]
+  );
+  res.json({ users: rows });
+});
+
+/**
+ * Read-only: paged character directory for staff. Search matches character
+ * name / linked Discord tag / persistentId.
+ */
+adminRouter.get("/characters", requirePermission("character.view"), async (req, res) => {
+  const query = typeof req.query.query === "string" ? req.query.query.trim() : null;
+  const limit = Math.max(1, Math.min(Number(req.query.limit) || 50, 200));
+  const offset = Math.max(0, Number(req.query.offset) || 0);
+  const { rows } = await pool.query(
+    `SELECT c.id, c.user_id, c.name, c.whitelisted, c.persistent_id,
+       c.created_at, c.last_seen_at, c.is_deleted, u.discord_tag
+     FROM characters c
+     JOIN users u ON u.id = c.user_id
+     WHERE ($1::text IS NULL OR c.name ILIKE '%' || $1 || '%'
+        OR u.discord_tag ILIKE '%' || $1 || '%' OR c.persistent_id ILIKE '%' || $1 || '%')
+     ORDER BY c.id DESC
+     LIMIT $2 OFFSET $3`,
+    [query, limit, offset]
+  );
+  res.json({ characters: rows });
+});
+
+/**
  * Read-only: players currently online (Redis presence). Useful for an
  * admin dashboard or a "who's on" widget — gated on auth.manage since it
  * exposes live player identity.
