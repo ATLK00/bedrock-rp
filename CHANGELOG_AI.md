@@ -133,6 +133,101 @@ heal.
 - See AI_HANDOFF Round 8.
 
 ---
+## [2026-09-09 22:05] — AI: big-pickle (opencode) — Housing system (property → storage + access + garage)
+
+### Task
+Roadmap item 2: real-estate domain per the user's architecture
+(Character → Property → {Storage, Access, Garage}), recognized by the
+existing inventory + vehicle systems: buying a house grants a storage room
+AND expands the character's vehicle garage capacity.
+
+### Changed
+- `backend/migrations/026_properties.sql` — `properties` table (type CHECK
+  house/apartment/warehouse/business/office, owner FK→characters, status
+  owned/seized, locked, garage_capacity, storage FK→inventories, sale
+  listing + currency, timestamps) with indexes; `rp:property_key` item seed
+  (non-stackable, weight 50); `property.manage` / `property.view`
+  permissions.
+- `backend/src/modules/property/index.ts` (new) — create/grant/delete/seize/
+  setSaleListing/buy/transfer/setPropertyLocked/getPropertySummary; deed key
+  = single `rp:property_key` with metadata `{property_id}`, granted AFTER
+  commit (buy/grant/transfer) and revoked on transfer/unlist/seize/delete;
+  storage container per property (storage_type='house', 100kg cap);
+  `getCharacterGarageCapacity` (base char + SUM owned property garages),
+  `canAccessContainer` / `listAccessibleContainerInventoryIds` for the
+  bridge; every action audited (`property.*`).
+- `backend/src/modules/vehicle/index.ts` — `getGarageSummary` +
+  `assertGarageRoom` now add property garage capacity (no circular import;
+  property module imports economy + inventory only).
+- `backend/src/modules/bridge/index.ts` — `requireVehicleActor`→`requireBridgeActor`
+  (reused); `/bridge/property/{mine,shop,lock,sell,buy,transfer}` with
+  `propertyCall` error mapper (404/403/409 + economy/inventory errors);
+  `/inventory/view` + `/inventory/move` extended to include key-held property
+  storage.
+- `backend/src/modules/admin/index.ts` — `/admin/properties` CRUD + grant/
+  seize/sell (property.manage writes, property.view reads) + helpers
+  `propertyAdminError` / `parsePropertyIdOr400`.
+- `backend/src/modules/character/routes.ts` — `GET /character/properties`.
+- `backend/src/web/adminWeb.ts` — NEW "อสังหาริมทรัพย์" tab (create form with
+  type/address/owner/garage/price, list with grant/sell/unlist/seize/delete,
+  uses fixed `act()` honoring DELETE).
+- `backend/src/web/playerWeb.ts` — property card (owned + deed-held keys +
+  total garage slots + storage count).
+- `behavior_pack/scripts/property_ui.js` (new) — `!house`/`!property`: root
+  menu (owned + keys), per-property lock/sell/unlist/transfer (online-player
+  dropdown via `getPersistentIdByName`) + "เปิดห้องเก็บของ" reusing
+  `openInventoryUi`; market browse + confirm buy toggle with the
+  `{ defaultValue: false }` API. Wired into `behavior_pack/scripts/main.js`.
+
+### Why
+Single authority over real estate + garage capacity (the pack never decides
+ownership or money); deed-key access model so a trusted player (e.g. a
+housemate) can use storage/lock without owning; government lots + player
+listings share one 2-phase buy path (money first, ownership swap second,
+race refunds via InUse).
+
+### Dependencies / Impact
+- Migration 026 applies on next `npm run migrate` / test bootstrap.
+- `behavior_pack/scripts/property_ui.js` must be copied to the BDS side
+  alongside `vehicle_ui.js`.
+
+### Tests
+- [PASS] suite **26/26** (new "properties: full lifecycle"): unlinked 404,
+  admin government-lot create (garage +2, storage container auto-created,
+  no deed), non-owner lock 403, buy without funds 409, buy (300000 cash
+  debited, deed delivered, listing cleared), garage capacity 3→5 across
+  `/bridge/property/mine` + `/bridge/vehicle/mine` + `/character/vehicles` +
+  `/character/properties`, owner storage view/move, key-holder (deed handed
+  over) view/move/lock, ownership transfer, list 400000 + shop, transfer
+  refused while listed, unlist, transfer back (key moves), admin grant/seize
+  (blocks lock + re-grant, capacity returns to 3) then delete (keys + storage
+  cleaned), audit rows for the 9 property actions.
+- [PASS] `npm run build` clean; `node --check` on `property_ui.js`, all pack
+  scripts + both served web app.js.
+
+### Security
+Pack never authorizes; bridge actor = persistentId; `property.manage` /
+`property.view` RBAC on admin routes; every transition audited; key-holder
+access is read/move/lock only (list-for-sale + transfer require ownership);
+seize expels all deeds.
+
+### Known Issues
+- One deed key per property is the shared-key model: handing the deed over is
+  the only "share access" path (no per-lockout access list yet).
+- Admin web property "วางขาย" prompt accepts any price; staff `sell` route
+  uses `isStaff`, bypassing ownership but still requiring a valid listing.
+- Live `!house` flow is NOT yet verified on a real BDS client (backing
+  backend routes are suite-covered).
+
+### Next Steps
+- Live-test `!house` (buy, lock, storage via `!inv`, transfer) with a
+  property created in the web admin; then proceed to roadmap item 3
+  (Police) → EMS → Phone.
+
+### Handoff Notes
+- See AI_HANDOFF Round 9.
+
+---
 ## [2026-09-09 18:10] — AI: big-pickle (opencode) — `!deduct` in-game + allow self-grant
 
 ### Task

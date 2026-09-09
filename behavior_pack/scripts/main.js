@@ -11,6 +11,7 @@ import {
   runVehicleSync,
   reconcileVehicleBoot,
 } from "./vehicle_ui.js";
+import { tryOpenPropertyUi } from "./property_ui.js";
 
 /**
  * IDENTITY NOTE: `world.afterEvents.playerJoin`'s `event.playerId` is
@@ -207,6 +208,17 @@ world.beforeEvents.chatSend.subscribe((event) => {
 
   // In-game vehicle system (`!car`).
   if (tryOpenVehicleUi(message, event.sender, {
+    postToBackend,
+    getPersistentId: () => persistentIdByName.get(event.sender.name),
+    getPersistentIdByName: (name) => persistentIdByName.get(name),
+    isConfigured: () => !!cachedBridgeConfig,
+  })) {
+    event.cancel = true; // never hit public chat
+    return;
+  }
+
+  // In-game property system (`!house`).
+  if (tryOpenPropertyUi(message, event.sender, {
     postToBackend,
     getPersistentId: () => persistentIdByName.get(event.sender.name),
     getPersistentIdByName: (name) => persistentIdByName.get(name),

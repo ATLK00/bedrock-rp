@@ -4,6 +4,7 @@ import { registerPlayerJoin, heartbeat, playerLeft } from "../player_session/ind
 import * as inventory from "../inventory/index.js";
 import * as economy from "../economy/index.js";
 import * as vehicle from "../vehicle/index.js";
+import * as property from "../property/index.js";
 import { hasPermission } from "../../rbac/index.js";
 import { emitSecurityEvent } from "../security/index.js";
 
@@ -161,10 +162,10 @@ bridgeRouter.post("/inventory/view", async (req, res) => {
   }
 
   const slots = await inventory.getInventory(character.id);
-  const containersRaw = await inventory.listInventories({ ownerCharacterId: character.id });
+  const accessibleIds = await property.listAccessibleContainerInventoryIds(character.id);
   const containers = [];
-  for (const c of containersRaw) {
-    const full = await inventory.getContainerInventory(Number(c.id));
+  for (const id of accessibleIds) {
+    const full = await inventory.getContainerInventory(id);
     if (full) containers.push({ ...full, id: Number(full.id) });
   }
   const usedWeightG = slots.reduce((sum: number, s: any) => sum + Number(s.quantity) * Number(s.weight_g ?? 0), 0);
@@ -224,7 +225,8 @@ bridgeRouter.post("/inventory/move", async (req, res) => {
     return res.status(404).json({ ok: false, message: "This Minecraft account is not linked to a character yet." });
   }
 
-  // Ownership: every container involved must be this character's own.
+  // Ownership: every container involved must be the character's own, OR owned
+  // by them via a held property deed key (property storage).
   const containerIds: number[] = [];
   for (const target of [fromTarget, toTarget]) {
     if (target.kind === "container") containerIds.push(target.id);
@@ -235,7 +237,8 @@ bridgeRouter.post("/inventory/move", async (req, res) => {
       logBridge("inv.move", req, startedAt, 404);
       return res.status(404).json({ ok: false, message: "Container not found." });
     }
-    if (container.owner_character_id !== null && Number(container.owner_character_id) !== character.id) {
+    const canAccess = await property.canAccessContainer(character.id, id);
+    if (!canAccess) {
       logBridge("inv.move", req, startedAt, 403);
       return res.status(403).json({ ok: false, message: "You can only move items in containers you own." });
     }
@@ -491,7 +494,7 @@ function pickCurrency(v: unknown): economy.Currency | null {
 }
 
 /** Resolve the live character driving a vehicle action by persistentId. */
-async function requireVehicleActor(res: any, body: any): Promise<{ characterId: number; userId: number } | null> {
+async function requireBridgeActor(res: any, body: any): Promise<{ characterId: number; userId: number } | null> {
   const { playerId } = (body ?? {}) as { playerId?: unknown };
   if (!isNonEmptyString(playerId) || playerId.length > MAX_IDENTIFIER_LENGTH) {
     res.status(400).json({ ok: false, message: "playerId is required." });
@@ -533,9 +536,155 @@ async function vehicleCall(req: any, res: any, action: string, fn: () => Promise
   }
 }
 
+/**
+ * Wraps a property action with uniform error -> HTTP mapping, mirroring
+ * vehicleCall (same error vocabulary: inventory + economy errors surface as
+ * 409 so a full inventory on deed delivery is tellable by the pack).
+ */
+async function propertyCall(req: any, res: any, action: string, fn: () => Promise<object>): Promise<void> {
+  const startedAt = Date.now();
+  try {
+    const result = await fn();
+    logBridge(action, req, startedAt, 200);
+    res.json({ ok: true, ...result });
+  } catch (err: any) {
+    let status = 500;
+    if (err instanceof property.PropertyNotFoundError) status = 404;
+    else if (err instanceof property.PropertyAccessDeniedError) status = 403;
+    else if (err instanceof property.PropertyInUseError) status = 409;
+    else if (err instanceof economy.InsufficientFundsError) status = 409;
+    else if (
+      err instanceof inventory.InventoryFullError ||
+      err instanceof inventory.CarryWeightExceededError ||
+      err instanceof inventory.InsufficientItemsError
+    ) {
+      status = 409;
+    }
+    logBridge(action, req, startedAt, status);
+    res.status(status).json({ ok: false, message: err && err.message ? err.message : "Something went wrong. Try again." });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Properties (called by behavior_pack/scripts/property_ui.js — `!house`).
+// Authority model mirrors vehicles: ownership, deeds, money and listing
+// state all live here; the pack sends a player choice and renders the
+// authoritative result. Sale is 2-phase like vehicle buy (money first, then
+// ownership swap, race refunds via PropertyInUseError).
+// ---------------------------------------------------------------------------
+
+function parsePropertyId(v: unknown): number | null {
+  const n = typeof v === "number" ? v : typeof v === "string" && v.trim() !== "" ? Number(v) : Number.NaN;
+  return Number.isInteger(n) && n > 0 ? n : null;
+}
+
+function parsePropertyType(v: unknown): string | null {
+  const t = String(v ?? "").trim();
+  return /^(house|apartment|warehouse|business|office)$/.test(t) ? t : null;
+}
+
+/** `!house` -> owned properties + deed-held access + total garage capacity. */
+bridgeRouter.post("/property/mine", async (req, res) => {
+  const actor = await requireBridgeActor(res, req.body);
+  if (!actor) return;
+  const summary = await property.getPropertySummary(actor.characterId);
+  if (!summary) return res.status(404).json({ ok: false, message: "Character not found." });
+  logBridge("property.mine", req, Date.now(), 200);
+  res.json({ ok: true, ...summary });
+});
+
+/** For-sale / government lot browsing (`!house` shop). */
+bridgeRouter.post("/property/shop", async (_req, res) => {
+  const properties = await property.listProperties({ forSale: true });
+  logBridge("property.shop", _req, Date.now(), 200);
+  res.json({ ok: true, properties });
+});
+
+bridgeRouter.post("/property/lock", async (req, res) => {
+  const actor = await requireBridgeActor(res, req.body);
+  if (!actor) return;
+  const propertyId = parsePropertyId((req.body ?? {}).propertyId);
+  if (!propertyId) return res.status(400).json({ ok: false, message: "propertyId is required." });
+  const { locked } = (req.body ?? {}) as { locked?: unknown };
+  if (typeof locked !== "boolean") return res.status(400).json({ ok: false, message: "locked must be a boolean." });
+  await propertyCall(req, res, "property.lock", async () => {
+    const view = await property.setPropertyLocked({
+      propertyId, characterId: actor.characterId, locked,
+      actorUserId: actor.userId,
+      requestId: (req as unknown as { requestId?: string }).requestId ?? null,
+    });
+    return { property: view };
+  });
+});
+
+/** List for sale / remove the listing (`!house` sell) — owner or staff. */
+bridgeRouter.post("/property/sell", async (req, res) => {
+  const actor = await requireBridgeActor(res, req.body);
+  if (!actor) return;
+  const propertyId = parsePropertyId((req.body ?? {}).propertyId);
+  if (!propertyId) return res.status(400).json({ ok: false, message: "propertyId is required." });
+  const { priceCents, currency } = (req.body ?? {}) as { priceCents?: unknown; currency?: unknown };
+  if (priceCents !== null && priceCents !== undefined) {
+    if (typeof priceCents !== "number" || !Number.isSafeInteger(priceCents) || priceCents <= 0) {
+      return res.status(400).json({ ok: false, message: "priceCents must be a positive integer or omitted to unlist." });
+    }
+  }
+  const cur = pickCurrency(currency);
+  if (!cur) return res.status(400).json({ ok: false, message: "currency must be cash, bank or red_money." });
+  const isStaff = await hasPermission(actor.userId, "property.manage");
+  await propertyCall(req, res, "property.sell", async () => {
+    const view = await property.setSaleListing({
+      propertyId, characterId: actor.characterId,
+      priceCents: typeof priceCents === "number" ? priceCents : null,
+      currency: typeof priceCents === "number" ? cur : undefined,
+      isStaff, actorUserId: actor.userId,
+      requestId: (req as unknown as { requestId?: string }).requestId ?? null,
+    });
+    return { property: view };
+  });
+});
+
+/** Free handover to another linked player (deed key moves atomically). */
+bridgeRouter.post("/property/transfer", async (req, res) => {
+  const actor = await requireBridgeActor(res, req.body);
+  if (!actor) return;
+  const { propertyId, targetPersistentId } = (req.body ?? {}) as { propertyId?: unknown; targetPersistentId?: unknown };
+  const id = parsePropertyId(propertyId);
+  if (!id) return res.status(400).json({ ok: false, message: "propertyId is required." });
+  if (!isNonEmptyString(targetPersistentId) || targetPersistentId.length > MAX_IDENTIFIER_LENGTH) {
+    return res.status(400).json({ ok: false, message: "targetPersistentId is required." });
+  }
+  const target = await findCharacterByPersistentId(String(targetPersistentId));
+  if (!target) return res.status(404).json({ ok: false, message: "That player isn't linked to a character on the server." });
+  await propertyCall(req, res, "property.transfer", async () => {
+    const view = await property.transferProperty({
+      propertyId: id, fromCharacterId: actor.characterId, toCharacterId: target.id,
+      actorUserId: actor.userId,
+      requestId: (req as unknown as { requestId?: string }).requestId ?? null,
+    });
+    return { property: view };
+  });
+});
+
+/** Buy a listed property (government lot or player listing). */
+bridgeRouter.post("/property/buy", async (req, res) => {
+  const actor = await requireBridgeActor(res, req.body);
+  if (!actor) return;
+  const propertyId = parsePropertyId((req.body ?? {}).propertyId);
+  if (!propertyId) return res.status(400).json({ ok: false, message: "propertyId is required." });
+  await propertyCall(req, res, "property.buy", async () => {
+    const view = await property.buyProperty({
+      propertyId, buyerCharacterId: actor.characterId,
+      actorUserId: actor.userId,
+      requestId: (req as unknown as { requestId?: string }).requestId ?? null,
+    });
+    return { property: view };
+  });
+});
+
 /** `!car` -> my garage (owned vehicles with state + garage capacity). */
 bridgeRouter.post("/vehicle/mine", async (req, res) => {
-  const actor = await requireVehicleActor(res, req.body);
+  const actor = await requireBridgeActor(res, req.body);
   if (!actor) return;
   const summary = await vehicle.getGarageSummary(actor.characterId);
   if (!summary) return res.status(404).json({ ok: false, message: "Character not found." });
@@ -545,7 +694,7 @@ bridgeRouter.post("/vehicle/mine", async (req, res) => {
 
 /** Deploy a garaged vehicle into the world (status -> deployed; pack spawns the entity). */
 bridgeRouter.post("/vehicle/deploy", async (req, res) => {
-  const actor = await requireVehicleActor(res, req.body);
+  const actor = await requireBridgeActor(res, req.body);
   if (!actor) return;
   const vehicleId = parseVehicleId((req.body ?? {}).vehicleId);
   if (!vehicleId) return res.status(400).json({ ok: false, message: "vehicleId is required." });
@@ -562,7 +711,7 @@ bridgeRouter.post("/vehicle/deploy", async (req, res) => {
 
 /** Send a vehicle back to the garage (pack despawns the entity). */
 bridgeRouter.post("/vehicle/store", async (req, res) => {
-  const actor = await requireVehicleActor(res, req.body);
+  const actor = await requireBridgeActor(res, req.body);
   if (!actor) return;
   const vehicleId = parseVehicleId((req.body ?? {}).vehicleId);
   if (!vehicleId) return res.status(400).json({ ok: false, message: "vehicleId is required." });
@@ -579,7 +728,7 @@ bridgeRouter.post("/vehicle/store", async (req, res) => {
 
 /** Lock / unlock a vehicle (blocks boarding by non-owners via the disabled rideable). */
 bridgeRouter.post("/vehicle/lock", async (req, res) => {
-  const actor = await requireVehicleActor(res, req.body);
+  const actor = await requireBridgeActor(res, req.body);
   if (!actor) return;
   const vehicleId = parseVehicleId((req.body ?? {}).vehicleId);
   if (!vehicleId) return res.status(400).json({ ok: false, message: "vehicleId is required." });
@@ -598,7 +747,7 @@ bridgeRouter.post("/vehicle/lock", async (req, res) => {
 
 /** Refuel from the wallet — cost settled server-side, fuel only ever added here. */
 bridgeRouter.post("/vehicle/refuel", async (req, res) => {
-  const actor = await requireVehicleActor(res, req.body);
+  const actor = await requireBridgeActor(res, req.body);
   if (!actor) return;
   const { vehicleId, units, currency } = (req.body ?? {}) as { vehicleId?: unknown; units?: unknown; currency?: unknown };
   const id = parseVehicleId(vehicleId);
@@ -621,7 +770,7 @@ bridgeRouter.post("/vehicle/refuel", async (req, res) => {
 
 /** Repair all mechanical/cosmetic damage — cost = missing health x per-point rates. */
 bridgeRouter.post("/vehicle/repair", async (req, res) => {
-  const actor = await requireVehicleActor(res, req.body);
+  const actor = await requireBridgeActor(res, req.body);
   if (!actor) return;
   const vehicleId = parseVehicleId((req.body ?? {}).vehicleId);
   const currency = pickCurrency((req.body ?? {}).currency);
@@ -676,7 +825,7 @@ bridgeRouter.post("/vehicle/shop", async (_req, res) => {
 
 /** Buy a listed vehicle — money moves first, ownership only on success (refund on race). */
 bridgeRouter.post("/vehicle/buy", async (req, res) => {
-  const actor = await requireVehicleActor(res, req.body);
+  const actor = await requireBridgeActor(res, req.body);
   if (!actor) return;
   const vehicleId = parseVehicleId((req.body ?? {}).vehicleId);
   if (!vehicleId) return res.status(400).json({ ok: false, message: "vehicleId is required." });
@@ -692,7 +841,7 @@ bridgeRouter.post("/vehicle/buy", async (req, res) => {
 
 /** List a vehicle for sale / remove the listing (`!car sell`) — seller must own + be parked. */
 bridgeRouter.post("/vehicle/sell", async (req, res) => {
-  const actor = await requireVehicleActor(res, req.body);
+  const actor = await requireBridgeActor(res, req.body);
   if (!actor) return;
   const { vehicleId, priceCents, currency } = (req.body ?? {}) as { vehicleId?: unknown; priceCents?: unknown; currency?: unknown };
   const id = parseVehicleId(vehicleId);
@@ -720,7 +869,7 @@ bridgeRouter.post("/vehicle/sell", async (req, res) => {
 
 /** Free handover to another linked player (key revokes/granted atomically). */
 bridgeRouter.post("/vehicle/transfer", async (req, res) => {
-  const actor = await requireVehicleActor(res, req.body);
+  const actor = await requireBridgeActor(res, req.body);
   if (!actor) return;
   const { vehicleId, targetPersistentId } = (req.body ?? {}) as { vehicleId?: unknown; targetPersistentId?: unknown };
   const id = parseVehicleId(vehicleId);

@@ -13,6 +13,7 @@ import { cleanupOldSessions } from "../auth/index.js";
 import * as cases from "../cases/index.js";
 import * as security from "../security/index.js";
 import * as vehicleAdmin from "../vehicle/index.js";
+import * as propertyAdmin from "../property/index.js";
 
 /**
  * Admin HTTP routes. Every route:
@@ -741,6 +742,144 @@ adminRouter.delete("/vehicles/:id", requirePermission("vehicle.manage"), async (
     res.status(204).end();
   } catch (err: any) {
     vehicleAdminError(res, err);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Properties — create, grant, seize, delete, set for sale, list/details.
+// Mirrors the vehicle admin surface; delegates to the property module (which
+// audits every transition and issues/revokes deeds).
+// ---------------------------------------------------------------------------
+
+function propertyAdminError(res: any, err: any) {
+  if (err instanceof propertyAdmin.PropertyNotFoundError) return res.status(404).json({ error: err.message });
+  if (err instanceof propertyAdmin.PropertyInUseError) return res.status(409).json({ error: err.message });
+  if (err instanceof inventory.InventoryFullError || err instanceof inventory.CarryWeightExceededError) {
+    return res.status(409).json({ error: "owner doesn't have room in their carry for the deed key item" });
+  }
+  return res.status(500).json({ error: err.message });
+}
+
+async function parsePropertyIdOr400(req: any, res: any): Promise<number | null> {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) {
+    res.status(400).json({ error: "property id must be a positive integer" });
+    return null;
+  }
+  return id;
+}
+
+adminRouter.get("/properties", requirePermission("property.view"), async (req, res) => {
+  try {
+    const limit = Number(req.query.limit ?? 50);
+    const offset = Number(req.query.offset ?? 0);
+    const status = typeof req.query.status === "string" ? req.query.status : undefined;
+    const forSale = req.query.forSale !== undefined;
+    const properties = await propertyAdmin.listProperties({
+      limit: Number.isFinite(limit) ? Math.max(1, Math.min(limit, 200)) : 50,
+      offset: Number.isFinite(offset) ? Math.max(0, offset) : 0,
+      status,
+      forSale,
+    });
+    res.json({ properties });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+adminRouter.get("/properties/:id", requirePermission("property.view"), async (req, res) => {
+  const id = await parsePropertyIdOr400(req, res);
+  if (!id) return;
+  const propertyRow = await propertyAdmin.getProperty(id);
+  if (!propertyRow) return res.status(404).json({ error: "property not found" });
+  const storage = propertyRow.storageInventoryId != null ? await inventory.getContainerInventory(propertyRow.storageInventoryId) : null;
+  res.json({ property: propertyRow, storage });
+});
+
+adminRouter.post("/properties", requirePermission("property.manage"), async (req, res) => {
+  const { propertyType, address, ownerCharacterId, garageCapacity, salePriceCents, saleCurrency, locked } = req.body ?? {};
+  const ownerId = ownerCharacterId == null ? null : Number(ownerCharacterId);
+  if (ownerId !== null && (!Number.isInteger(ownerId) || ownerId <= 0)) {
+    return res.status(400).json({ error: "ownerCharacterId must be a positive integer or null" });
+  }
+  if (typeof address !== "string" || address.trim() === "") {
+    return res.status(400).json({ error: "address is required" });
+  }
+  try {
+    const view = await propertyAdmin.createProperty({
+      propertyType: typeof propertyType === "string" ? propertyType : undefined,
+      address,
+      ownerCharacterId: ownerId,
+      garageCapacity: typeof garageCapacity === "number" ? garageCapacity : undefined,
+      salePriceCents: typeof salePriceCents === "number" ? salePriceCents : null,
+      saleCurrency: typeof saleCurrency === "string" ? saleCurrency : undefined,
+      locked: typeof locked === "boolean" ? locked : undefined,
+      actorUserId: req.userId!,
+      requestId: requestIdOf(req),
+    });
+    res.status(201).json({ property: view });
+  } catch (err: any) {
+    propertyAdminError(res, err);
+  }
+});
+
+adminRouter.post("/properties/:id/grant", requirePermission("property.manage"), async (req, res) => {
+  const id = await parsePropertyIdOr400(req, res);
+  if (!id) return;
+  const ownerId = Number((req.body ?? {}).ownerCharacterId);
+  if (!Number.isInteger(ownerId) || ownerId <= 0) {
+    return res.status(400).json({ error: "ownerCharacterId (positive integer) is required" });
+  }
+  try {
+    const view = await propertyAdmin.grantProperty({ propertyId: id, ownerCharacterId: ownerId, actorUserId: req.userId!, requestId: requestIdOf(req) });
+    res.json({ property: view });
+  } catch (err: any) {
+    propertyAdminError(res, err);
+  }
+});
+
+adminRouter.post("/properties/:id/seize", requirePermission("property.manage"), async (req, res) => {
+  const id = await parsePropertyIdOr400(req, res);
+  if (!id) return;
+  try {
+    const view = await propertyAdmin.seizeProperty({ propertyId: id, actorUserId: req.userId!, requestId: requestIdOf(req) });
+    res.json({ property: view });
+  } catch (err: any) {
+    propertyAdminError(res, err);
+  }
+});
+
+adminRouter.post("/properties/:id/sell", requirePermission("property.manage"), async (req, res) => {
+  const id = await parsePropertyIdOr400(req, res);
+  if (!id) return;
+  const { priceCents, currency } = req.body ?? {};
+  if (priceCents !== undefined && priceCents !== null && (typeof priceCents !== "number" || !Number.isSafeInteger(priceCents) || priceCents <= 0)) {
+    return res.status(400).json({ error: "priceCents must be a positive integer or omitted to unlist" });
+  }
+  try {
+    const view = await propertyAdmin.setSaleListing({
+      propertyId: id,
+      characterId: Number((req.body ?? {}).ownerCharacterId) || 0,
+      priceCents: typeof priceCents === "number" ? priceCents : null,
+      currency: currency === "cash" || currency === "bank" || currency === "red_money" ? currency : undefined,
+      isStaff: true,
+      actorUserId: req.userId!,
+      requestId: requestIdOf(req),
+    });
+    res.json({ property: view });
+  } catch (err: any) {
+    propertyAdminError(res, err);
+  }
+});
+
+adminRouter.delete("/properties/:id", requirePermission("property.manage"), async (req, res) => {
+  const id = await parsePropertyIdOr400(req, res);
+  if (!id) return;
+  try {
+    await propertyAdmin.deleteProperty({ propertyId: id, actorUserId: req.userId!, requestId: requestIdOf(req) });
+    res.status(204).end();
+  } catch (err: any) {
+    propertyAdminError(res, err);
   }
 });
 

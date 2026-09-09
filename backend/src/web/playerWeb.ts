@@ -188,6 +188,7 @@ const APP_JS = `
     page.appendChild(el('<div id="carry-card" class="card"><h2>ของที่ถือ</h2><p class="muted">กำลังโหลด…</p></div>'));
     page.appendChild(el('<div id="container-card" class="card"><h2>ตู้เก็บของ</h2><p class="muted">กำลังโหลด…</p></div>'));
     page.appendChild(el('<div id="garage-card" class="card"><h2>อู่ของคุณ</h2><p class="muted">กำลังโหลด…</p></div>'));
+    page.appendChild(el('<div id="property-card" class="card"><h2>อสังหาริมทรัพย์</h2><p class="muted">กำลังโหลด…</p></div>'));
     setApp(page);
 
     // link-code area
@@ -217,18 +218,20 @@ const APP_JS = `
       });
     }
 
-    // wallet + carry + containers + garage (parallel)
+    // wallet + carry + containers + garage + properties (parallel)
     Promise.all([
       api("/character/wallet"),
       api("/character/inventory"),
       api("/inventories"),
       api("/character/vehicles"),
+      api("/character/properties"),
     ]).then(function (results) {
-      var wallet = results[0], inv = results[1], containers = results[2], garage = results[3];
+      var wallet = results[0], inv = results[1], containers = results[2], garage = results[3], properties = results[4];
       renderWallet(page.querySelector("#wallet-card"), wallet);
       renderCarry(page.querySelector("#carry-card"), inv);
       renderContainers(page.querySelector("#container-card"), containers, page);
       renderGarage(page.querySelector("#garage-card"), garage);
+      renderProperties(page.querySelector("#property-card"), properties);
     });
   }
 
@@ -307,6 +310,30 @@ const APP_JS = `
       '<h2>อู่ของคุณ</h2><p class="muted">ที่จอด: ' + esc(String(d.vehicleCount)) + " / " + esc(String(d.garageCapacity)) + "</p>" +
       (rows ? "<table><tr><th>ป้าย</th><th>ชนิด</th><th>สถานะ</th><th>น้ำมัน</th><th>ความเสียหาย</th><th>ราคาขาย</th></tr>" + rows + "</table>"
         : '<p class="muted">ยังไม่มีรถ — ไปซื้อที่โชว์รูมในเกมได้เลย</p>');
+  }
+
+  function renderProperties(card, props) {
+    if (!props.ok) { card.innerHTML = '<h2>อสังหาริมทรัพย์</h2><p class="muted">' + esc((props.data && props.data.error) || "ไม่พร้อมใช้งาน") + '</p>'; return; }
+    var d = props.data;
+    var owned = (d.properties || []).filter(function (p) { return p.status !== "seized"; });
+    var rows = owned.map(function (p) {
+      return "<tr><td><strong>" + esc(p.address) + "</strong></td>" +
+        "<td>" + esc(p.propertyType) + "</td>" +
+        "<td class=\\"muted\\">🏠 " + esc(String(p.garageCapacity)) + " ที่จอด</td>" +
+        "<td>" + (p.salePriceCents != null ? money(p.salePriceCents) + " " + esc(p.saleCurrency) : "—") + "</td></tr>";
+    }).join("");
+    var keys = (d.keys || []).map(function (p) {
+      return "<tr><td><strong>" + esc(p.address) + "</strong></td><td>🔑 ถือกุญแจ</td>" +
+        "<td class=\\"muted\\">" + esc(p.propertyType) + "</td><td>—</td></tr>";
+    }).join("");
+    card.innerHTML =
+      '<h2>อสังหาริมทรัพย์</h2>' +
+      '<p class="muted">ที่จอดรวม: ' + esc(String(d.garageCapacity)) + " ][ จำนวน: " + esc(String(d.propertyCount || 0)) + '</p>' +
+      (rows ? "<table><tr><th>ที่อยู่</th><th>ประเภท</th><th>อู่</th><th>ราคาขาย</th></tr>" + rows + "</table>"
+        : '<p class="muted">ยังไม่มีอสังหาริมทรัพย์ — เปิด ' + esc("!house") + ' ในเกมเพื่อซื้อ</p>');
+    if (keys) {
+      card.appendChild(el('<h3>🔑 กุญแจที่ถือ</h3>' + "<table><tr><th>ที่อยู่</th><th>สถานะ</th><th>ประเภท</th><th>ราคาขาย</th></tr>" + keys + "</table>"));
+    }
   }
 
   async function boot() {

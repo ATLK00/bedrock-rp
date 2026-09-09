@@ -7,6 +7,50 @@
   real infrastructure; a small set of infrastructure-dependent paths remains
   explicitly unverified (listed below under **Unverified**).
 
+## 2026-09-09 Round 9 — Housing system (property → storage + access + garage)
+
+- New real-estate domain as its own module `backend/src/modules/property/`
+  (new) + migration `026_properties.sql`: `properties` table
+  (type CHECK house/apartment/warehouse/business/office, owner FK to
+  characters, status owned/seized, locked, garage_capacity, storage FK to
+  inventories, sale listing, timestamps), `rp:property_key` item seed, and
+  `property.manage` / `property.view` permissions.
+- Per the user's architecture (Character → Property → {Storage, Access,
+  Garage}): every property creates a `storage_type='house'` container
+  (owner = property owner, shown in `!inv`), ownership lives on the
+  character, and a physical deed key (`rp:property_key`, metadata
+  `{property_id}`) is issued — a key-holder can unlock/open the house without
+  owning it (`canAccessContainer` powers the bridge). Garage integration:
+  `vehicle.getGarageSummary` + `assertGarageRoom` now add
+  `SUM(properties.garage_capacity WHERE owned)` to the character's base
+  garage cap (module export `getCharacterGarageCapacity`; no circular import).
+- Bridge: `requireVehicleActor` renamed to the generic `requireBridgeActor`
+  and reused; new `/bridge/property/{mine,shop,lock,sell,buy,transfer}` under
+  shared-HMAC with a `propertyCall` error mapper mirroring `vehicleCall` (404/
+  403/409 incl. InflationFunds + inventory errors). `/inventory/view` now
+  returns owned + key-held containers (`listAccessibleContainerInventoryIds`)
+  and `/inventory/move` allows key-holders.
+- Commerce is 2-phase like vehicles (money first, ownership swap second, race
+  refunds via InUse): government lots debit the buyer; player listings use
+  `economy.transfer` buyer→seller. Buy/grant/transfer delver the deed key
+  AFTER commit; transfer/unlist/seize revoke old keys; delete clears keys +
+  storage container.
+- Admin routes `/admin/properties` (+ grant/seize/sell/delete, `property.manage`
+  writes / `property.view` reads) with web "อสังหาริมทรัพย์" tab; player web
+  property card (`GET /character/properties`).
+- Pack UI `behavior_pack/scripts/property_ui.js` (new,
+  `!house`/`!property`): root menu lists owned + deed-held keys + total
+  garage slots; per-property lock, sell/unlist, transfer to an online player
+  (`getPersistentIdByName`, like vehicles), open storage via the shared
+  `openInventoryUi`; market browser + confirm-buy toggle using the
+  `{ defaultValue: false }` API. Wired into `main.js`.
+- Integration test 26 "properties: full lifecycle" (unlinked 404, government
+  lot create with garage +2, non-owner 403, buy debits + lands key, capacity
+  3→5 across `/bridge/property/mine`, `/bridge/vehicle/mine`, `/character/
+  vehicles`, `/character/properties`, owner storage view/move, key-holder
+  view/move/lock, transfer ownership, list/unlist, seize+delete cleanup,
+  audit rows for the 9 property actions). Suite **26/26** green.
+
 ## 2026-09-09 Round 8 — Vehicle system (auto dealership → owned cars, end-to-end)
 
 - User's Car AllDay Town addon integrated as a **server-authoritative vehicle
@@ -431,19 +475,22 @@ patch automation (`tools/leveldat_patch.py`), deploy/backup tooling
 (verified live on BDS 1.26.45.1: `!inv` + compass trigger + spawn link form +
 `@minecraft/server-chat` finding), the player web panel
 (`GET /player` ..., 22-test suite), the **admin web panel** (`GET /admin`,
-23-test suite, MASTER_PROMPT §22), and the **vehicle system** (Round 8,
-25-test suite) are all done.
+23-test suite, MASTER_PROMPT §22), the **vehicle system** (Round 8,
+25-test suite), and the **housing system** (Round 9 — property module,
+garage-integrated storage/access, `!house` UI, 26-test suite) are all done.
 Remaining verified-gaps: real-browser passes of `/admin`, `/player` and the
-new vehicle admin tab (open `http://<host>:8080/` in a browser — all serve
-valid now, incl. a local `node --check` syntax pass on the served JS);
-**live vehicle verification** — deploy/ride/sync/refuel/repair/sell on a real
-BDS client with the `vehicle_pack/` RP installed (upload it to MCY/World for
-players, install `behavior_pack/scripts/vehicle_ui.js` on the BDS side); live
-Discord OAuth was user-confirmed (2026-09-09) but not independently observed;
-the "heartbeat-after-leave drops presence" drop is HTTP-suite covered and can
-be observed live with a documented curl check; the compass `itemUse` trigger
-caveat and the vanilla-36-slot-size confirmation both still need a real
-client. CI runs on push to `ATLK00/bedrock-rp` master.
+new vehicle + property admin tabs (open `http://<host>:8080/` in a browser —
+all serve valid now, incl. a local `node --check` syntax pass on the served
+JS); **live vehicle verification** — deploy/ride/sync/refuel/repair/sell on a
+real BDS client with the `vehicle_pack/` RP installed (upload it to MCY/World
+for players, install `behavior_pack/scripts/vehicle_ui.js` on the BDS side);
+**live property verification** — `!house` buy/lock/storage/transfer on a real
+client (stem `behavior_pack/scripts/property_ui.js` — not yet copied to BDS);
+live Discord OAuth was user-confirmed (2026-09-09) but not independently
+observed; the "heartbeat-after-leave drops presence" drop is HTTP-suite
+covered and can be observed live with a documented curl check; the compass
+`itemUse` trigger caveat and the vanilla-36-slot-size confirmation both still
+need a real client. CI runs on push to `ATLK00/bedrock-rp` master.
 
 ## Do Not Change
 - One Discord account = one character

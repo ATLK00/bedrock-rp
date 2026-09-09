@@ -2,6 +2,7 @@ import { pool, withTransaction } from "../../db/pool.js";
 import { writeAudit } from "../../audit/index.js";
 import * as inventory from "../inventory/index.js";
 import * as economy from "../economy/index.js";
+import * as property from "../property/index.js";
 
 /**
  * Vehicle system — the server-authoritative half of in-world vehicles.
@@ -85,13 +86,15 @@ async function lockVehicleRow(client: any, vehicleId: number) {
 
 async function assertGarageRoom(client: any, characterId: number): Promise<void> {
   const { rows } = await client.query(
-    `SELECT c.garage_capacity,
+    `SELECT c.garage_capacity +
+              COALESCE((SELECT SUM(p.garage_capacity) FROM properties p WHERE p.owner_character_id = c.id AND p.status = 'owned'), 0)
+            AS capacity,
             (SELECT COUNT(*) FROM vehicles v WHERE v.owner_character_id = c.id AND v.status <> 'seized')::int AS owned
      FROM characters c WHERE c.id = $1`,
     [characterId]
   );
   if (rows.length === 0) throw new Error("character not found");
-  if (Number(rows[0].owned) >= Number(rows[0].garage_capacity)) throw new VehicleGarageFullError();
+  if (Number(rows[0].owned) >= Number(rows[0].capacity)) throw new VehicleGarageFullError();
 }
 
 /** Inventories storage_type='vehicle' — the trunk. Created in the same tx as the vehicle row. */
@@ -922,15 +925,16 @@ export async function reconcileDeployed(params: {
 // ---------------------------------------------------------------------------
 
 export async function getGarageSummary(characterId: number) {
-  const { rows } = await pool.query(
-    `SELECT garage_capacity FROM characters WHERE id = $1`,
-    [characterId]
-  );
-  if (rows.length === 0) return null;
+  if (!(await characterExists(characterId))) return null;
   const vehicles = await listVehicles({ ownerCharacterId: characterId });
   return {
-    garageCapacity: Number(rows[0].garage_capacity),
+    garageCapacity: await property.getCharacterGarageCapacity(characterId),
     vehicleCount: vehicles.filter((v) => v.status !== "seized").length,
     vehicles,
   };
+}
+
+async function characterExists(characterId: number): Promise<boolean> {
+  const { rows } = await pool.query(`SELECT 1 FROM characters WHERE id = $1`, [characterId]);
+  return rows.length > 0;
 }

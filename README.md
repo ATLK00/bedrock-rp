@@ -44,15 +44,24 @@ audit-logged. Built per `docs/MASTER_PROMPT.md`.
   `/bridge/vehicle/*` and admin `/admin/vehicles/*` routes; the Car AllDay Town
   addon is vendored at `vehicle_pack/` (pack only reports ticks/sensors — the
   server is the single authority).
+- **Properties**: server-authoritative real estate (address/type, owner on the
+  character, deed key `rp:property_key` item), each property carries a house
+  storage container (reusable with `!inv`) AND a garage capacity that ADDS to the
+  owner's vehicle slots — buying a house genuinely expands what a character can
+  own, wiring the garage into the vehicle system. Key-holders (deed handed over)
+  can unlock/open storage without owning. Government lots bought from the market,
+  player-to-player listing/sale/unlist, free transfer, staff grant/seize/delete.
+  Bridge `/bridge/property/*` and admin `/admin/properties/*` routes; in-game
+  menu is `!house` / `!property`.
 - **Admin surface**: audit-log viewer (`GET /admin/audit`, incl. `before/after/reason`),
   multi-currency economy reads (`GET /admin/economy/character/:id`), container CRUD,
   character update/view (locked-field approval path).
 
 Integration suite (`backend/src/test/integration.test.ts`) runs against a throwaway
-`bedrock_rp_test` DB (25 tests: auth, character create/link/delete/details-lock-case,
+`bedrock_rp_test` DB (26 tests: auth, character create/link/delete/details-lock-case,
 bridge secret/signature/replay, presence + stale-heartbeat, RBAC, economy
 cash/bank/red-money/anomaly/idempotency, inventory weight + containers, cases,
-security events, vehicles full lifecycle).
+security events, vehicles full lifecycle, properties full lifecycle).
 Spec: `npm run migrate`, `npm run build`, `npm test` (needs `ops` docker stack up).
 
 **Not locked yet** — do not assume:

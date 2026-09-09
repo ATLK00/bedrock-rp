@@ -110,9 +110,10 @@ const APP_JS = `
     return;
   }
 
-  var TABS = ["overview", "users", "characters", "shop", "cases", "audit", "security", "roles", "vehicles"];
+  var TABS = ["overview", "users", "characters", "shop", "cases", "audit", "security", "roles", "vehicles", "properties"];
   var LABELS = { overview: "ภาพรวม", users: "ผู้เล่น", characters: "ตัวละคร",
-    shop: "ร้านค้า", cases: "เคส", audit: "Audit", security: "Security", roles: "Roles", vehicles: "รถยนต์" };
+    shop: "ร้านค้า", cases: "เคส", audit: "Audit", security: "Security", roles: "Roles", vehicles: "รถยนต์",
+    properties: "อสังหาริมทรัพย์" };
 
   function el(html) {
     var d = document.createElement("div");
@@ -179,6 +180,7 @@ const APP_JS = `
       overview: renderOverview, users: renderUsers, characters: renderCharacters,
       shop: renderShop, cases: renderCases, audit: renderAudit,
       security: renderSecurity, roles: renderRoles, vehicles: renderVehicles,
+      properties: renderProperties,
     };
     renderers[name](page);
   }
@@ -741,7 +743,11 @@ const APP_JS = `
       var id = t.getAttribute && (t.getAttribute("data-vgrant") || t.getAttribute("data-vrepair") || t.getAttribute("data-vseize") || t.getAttribute("data-vdel"));
       if (!id) return;
       function act(method, endpoint, body) {
-        postJSON(endpoint, body || {}).then(function (r) {
+        api(endpoint, method === "GET" ? {} : {
+          method: method,
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body || {}),
+        }).then(function (r) {
           toast(r.ok ? "ok" : ((r.data && r.data.error) || "fail"));
           loadList();
         });
@@ -757,6 +763,103 @@ const APP_JS = `
       } else if (t.getAttribute("data-vdel")) {
         if (!confirm("ลบรถคันนี้จริง ๆ เหรอ? (รวมของในท้ายรถ)")) return;
         act("DELETE", "/admin/vehicles/" + id, {});
+      }
+    });
+    loadList();
+  }
+
+  // ------------------------------------------------ properties
+  function renderProperties(page) {
+    var PROPERTY_TYPES = ["house", "apartment", "warehouse", "business", "office"];
+    page.innerHTML = "";
+    page.appendChild(el(
+      "<div class=\\"card\\"><h2>สร้างอสังหาริมทรัพย์</h2>" +
+      "<div class=\\"row\\">" +
+      "<select id=\\"p-type\\">" + PROPERTY_TYPES.map(function (t) { return "<option>" + t + "</option>"; }).join("") + "</select>" +
+      "<input id=\\"p-addr\\" placeholder=\\"ที่อยู่ (เช่น 123 ถ.พระราม 1)\\">" +
+      "<input id=\\"p-owner\\" type=\\"number\\" placeholder=\\"ownerCharacterId (ว่าง = ที่ดินรัฐ)\\">" +
+      "<input id=\\"p-garage\\" type=\\"number\\" placeholder=\\"garageCapacity (default 2)\\">" +
+      "<input id=\\"p-price\\" type=\\"number\\" placeholder=\\"priceCents (ว่าง = ไม่ขาย)\\">" +
+      "<button id=\\"p-create\\" class=\\"btn primary\\">สร้าง</button>" +
+      "<span id=\\"p-create-msg\\" class=\\"muted\\"></span></div></div>"
+    ));
+    page.appendChild(el(
+      "<div class=\\"card\\"><h2>อสังหาริมทรัพย์ทั้งหมด</h2>" +
+      "<div class=\\"row\\"><button id=\\"p-refresh\\" class=\\"btn\\">Refresh</button><span id=\\"p-msg\\" class=\\"muted\\"></span></div>" +
+      "<div id=\\"plist\\"><p class=\\"muted\\">กำลังโหลด…</p></div></div>"
+    ));
+
+    function loadList() {
+      api("/admin/properties?limit=100").then(function (r) {
+        var out = page.querySelector("#plist");
+        if (!r.ok) { out.innerHTML = errBox((r.data && r.data.error) || "failed"); return; }
+        var rows = (r.data && r.data.properties || []).map(function (p) {
+          return "<tr><td><strong>" + esc(p.address) + "</strong></td>" +
+            "<td>" + esc(p.propertyType) + "</td>" +
+            "<td>" + esc(p.ownerName || (p.ownerCharacterId ? "#" + p.ownerCharacterId : "—")) + "</td>" +
+            "<td>" + esc(p.status) + "</td>" +
+            "<td>" + esc(p.locked ? "ล็อก" : "ปลด") + "</td>" +
+            "<td>" + esc(String(p.garageCapacity)) + "</td>" +
+            "<td>" + (p.salePriceCents != null ? money(p.salePriceCents) + " " + esc(p.saleCurrency) : "—") + "</td>" +
+            "<td>" +
+            "<button class=\\"btn small\\" data-pgrant=\\"" + p.id + "\\">มอบให้</button> " +
+            "<button class=\\"btn small\\" data-psell=\\"" + p.id + "\\">วางขาย</button> " +
+            "<button class=\\"btn small danger\\" data-pseize=\\"" + p.id + "\\">ยึด</button> " +
+            "<button class=\\"btn small danger\\" data-pdel=\\"" + p.id + "\\">ลบ</button>" +
+            "</td></tr>";
+        }).join("");
+        out.innerHTML = rows
+          ? "<table><tr><th>ที่อยู่</th><th>ประเภท</th><th>เจ้าของ</th><th>สถานะ</th><th>ล็อก</th><th>อู่</th><th>ราคาขาย</th><th>จัดการ</th></tr>" + rows + "</table>"
+          : "<p class=\\"muted\\">ยังไม่มีอสังหาริมทรัพย์ในระบบ</p>";
+      });
+    }
+    page.querySelector("#p-refresh").addEventListener("click", loadList);
+
+    page.querySelector("#p-create").addEventListener("click", function () {
+      var body = { propertyType: page.querySelector("#p-type").value, address: page.querySelector("#p-addr").value.trim() };
+      if (!body.address) { page.querySelector("#p-create-msg").textContent = "ต้องใส่ที่อยู่"; return; }
+      var owner = Number(page.querySelector("#p-owner").value);
+      var garage = Number(page.querySelector("#p-garage").value);
+      var price = page.querySelector("#p-price").value;
+      if (page.querySelector("#p-owner").value.trim() !== "") body.ownerCharacterId = owner;
+      if (page.querySelector("#p-garage").value.trim() !== "") body.garageCapacity = garage;
+      if (price.trim() !== "") { body.salePriceCents = Number(price); body.saleCurrency = "cash"; }
+      postJSON("/admin/properties", body).then(function (r) {
+        var msg = page.querySelector("#p-create-msg");
+        if (!r.ok) { msg.textContent = (r.data && r.data.error) || "fail"; return; }
+        msg.textContent = "สร้างแล้ว " + (r.data && r.data.property && r.data.property.address || "");
+        page.querySelector("#p-refresh").click();
+      });
+    });
+
+    page.addEventListener("click", function (e) {
+      var t = e.target;
+      var id = t.getAttribute && (t.getAttribute("data-pgrant") || t.getAttribute("data-psell") || t.getAttribute("data-pseize") || t.getAttribute("data-pdel"));
+      if (!id) return;
+      function act(method, endpoint, body) {
+        api(endpoint, method === "GET" ? {} : {
+          method: method,
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body || {}),
+        }).then(function (r) {
+          toast(r.ok ? "ok" : ((r.data && r.data.error) || "fail"));
+          loadList();
+        });
+      }
+      if (t.getAttribute("data-pgrant")) {
+        var owner = prompt("ownerCharacterId?");
+        if (!owner) return;
+        act("POST", "/admin/properties/" + id + "/grant", { ownerCharacterId: Number(owner) });
+      } else if (t.getAttribute("data-psell")) {
+        var price = prompt("priceCents (ว่าง = เอาออกขาย/unlist):");
+        if (price === null) return;
+        act("POST", "/admin/properties/" + id + "/sell", price.trim() === "" ? {} : { priceCents: Number(price), saleCurrency: "cash" });
+      } else if (t.getAttribute("data-pseize")) {
+        if (!confirm("ยึดอสังหาริมทรัพย์นี้จริง ๆ เหรอ?")) return;
+        act("POST", "/admin/properties/" + id + "/seize", {});
+      } else if (t.getAttribute("data-pdel")) {
+        if (!confirm("ลบอสังหาริมทรัพย์นี้จริง ๆ เหรอ? (รวมห้องเก็บของในตัว)")) return;
+        act("DELETE", "/admin/properties/" + id, {});
       }
     });
     loadList();

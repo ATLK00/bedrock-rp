@@ -1690,6 +1690,194 @@ test("integration suite", async (t) => {
     }
   });
 
+  await t.test("properties: create/grant/buy/storage key access/sell/transfer/seize/delete + garage capacity", async () => {
+    const bridgePost = async (path: string, body: unknown) => {
+      const raw = JSON.stringify(body);
+      return fetch(`${baseUrl}${path}`, { method: "POST", headers: signedHeaders(BDS_SECRET, raw), body: raw });
+    };
+    const bridgeJson = async (path: string, body: unknown) =>
+      ((await bridgePost(path, body)).json()) as Promise<any>;
+
+    // fresh linked characters K (buyer) and L (recipient/key-holder)
+    const k = await upsertUserByDiscordId("2201", "UserK");
+    const tokenK = await issueSessionToken(k.id);
+    assert.equal((await postAs("/character", { name: "Kim" }, tokenK)).status, 201);
+    const l = await upsertUserByDiscordId("2202", "UserL");
+    const tokenL = await issueSessionToken(l.id);
+    assert.equal((await postAs("/character", { name: "Leo" }, tokenL)).status, 201);
+    for (const [tag, xuid] of [["K", "p-K"], ["L", "p-L"]] as const) {
+      const codeRes = await postAs("/character/link-code", {}, tag === "K" ? tokenK : tokenL);
+      const { code } = await codeRes.json();
+      const raw = JSON.stringify({ code, xuid });
+      assert.equal((await fetch(`${baseUrl}/bridge/character/link`, {
+        method: "POST", headers: signedHeaders(BDS_SECRET, raw), body: raw,
+      })).status, 200);
+    }
+
+    const charK = Number((await pool.query(
+      `SELECT id FROM characters WHERE persistent_id = 'p-K'`
+    )).rows[0].id);
+    const charL = Number((await pool.query(
+      `SELECT id FROM characters WHERE persistent_id = 'p-L'`
+    )).rows[0].id);
+
+    const cash = async (cid: number) => Number((await pool.query(
+      `SELECT balance_cents FROM wallets WHERE character_id = $1`, [cid]
+    )).rows[0]?.balance_cents ?? 0);
+    const deedCount = async (cid: number, pid: number) => Number((await pool.query(
+      `SELECT COALESCE(SUM(quantity), 0)::int FROM inventory_slots
+       WHERE character_id = $1 AND item_id = 'rp:property_key' AND (item_metadata->>'property_id')::bigint = $2`,
+      [cid, pid]
+    )).rows[0].coalesce);
+
+    // unlinked bridge playerId -> 404
+    assert.equal((await bridgePost("/bridge/property/mine", { playerId: "p-nobody" })).status, 404);
+
+    // admin creates an unowned government lot for sale (garage +2, deed-less)
+    const created = (await postAs("/admin/properties", {
+      propertyType: "house", address: "123 Test Road", ownerCharacterId: null,
+      garageCapacity: 2, salePriceCents: 300000, saleCurrency: "cash",
+    }, ctx.tokenA)).status;
+    assert.equal(created, 201);
+    const prop = (await (await getAs("/admin/properties", ctx.tokenA)).json()).properties
+      .find((p: any) => p.address === "123 Test Road");
+    assert.ok(prop, "property listed in admin list");
+    assert.equal(prop.status, "owned");
+    assert.equal(prop.ownerCharacterId, null);
+    assert.equal(prop.garageCapacity, 2);
+    assert.equal(prop.storageInventoryId > 0, true);
+    assert.equal(await deedCount(charK, prop.id), 0);
+    assert.equal(await deedCount(charL, prop.id), 0);
+
+    // non-owner without a key cannot touch it (403 on lock)
+    assert.equal((await bridgePost("/bridge/property/lock", {
+      playerId: "p-L", propertyId: prop.id, locked: false,
+    })).status, 403);
+    // buying without funds -> 409 (InsufficientFunds)
+    assert.equal((await bridgePost("/bridge/property/buy", { playerId: "p-L", propertyId: prop.id })).status, 409);
+
+    // Kim funds up and buys the lot: money debited, deed delivered, listing cleared
+    await ctx.economy.credit({ characterId: charK, amountCents: 500000, reason: "test seed", actorUserId: k.id, currency: "cash" });
+    assert.equal(await cash(charK), 500000);
+    const bought = await bridgeJson("/bridge/property/buy", { playerId: "p-K", propertyId: prop.id });
+    assert.equal(bought.ok, true);
+    assert.equal(bought.property.ownerCharacterId, charK);
+    assert.equal(bought.property.salePriceCents, null);
+    assert.equal(await cash(charK), 200000);
+    assert.equal(await deedCount(charK, prop.id), 1);
+
+    // garage capacity now includes the property (+2 on the base 3) — bridge + web
+    const mine = await bridgeJson("/bridge/property/mine", { playerId: "p-K" });
+    assert.equal(mine.ok, true);
+    assert.equal(mine.garageCapacity, 5);
+    const garageK = await bridgeJson("/bridge/vehicle/mine", { playerId: "p-K" });
+    assert.equal(garageK.garageCapacity, 5);
+    const webGarageK = await (await getAs("/character/vehicles", tokenK)).json();
+    assert.equal(webGarageK.garageCapacity, 5);
+
+    // property web card
+    const webProps = await (await getAs("/character/properties", tokenK)).json();
+    assert.equal(webProps.garageCapacity, 5);
+    assert.equal(webProps.propertyCount, 1);
+    assert.equal(webProps.storageCount, 1);
+
+    // storage is visible + usable by the owner
+    const viewOwner = await (await bridgePost("/bridge/inventory/view", { playerId: "p-K" })).json();
+    const storage = viewOwner.containers.find((c: any) => Number(c.id) === prop.storageInventoryId);
+    assert.ok(storage, "owner sees property storage listed");
+    assert.equal(storage.storage_type, "house");
+    await postAs("/admin/inventory/give", { characterId: charK, itemId: "rp:bandage", quantity: 10 }, ctx.tokenA);
+    const moveIn = await bridgeJson("/bridge/inventory/move", {
+      playerId: "p-K", itemId: "rp:bandage", quantity: 4, from: "character", to: storage.id,
+    });
+    assert.equal(moveIn.ok, true);
+
+    // key-holder access: hand Kim's deed physical item to Leo (no ownership change)
+    await pool.query(
+      `UPDATE inventory_slots SET character_id = $1
+       WHERE character_id = $2 AND item_id = 'rp:property_key' AND (item_metadata->>'property_id')::bigint = $3`,
+      [charL, charK, prop.id]
+    );
+    assert.equal(await deedCount(charK, prop.id), 0);
+    assert.equal(await deedCount(charL, prop.id), 1);
+    // Leo (key only) can view + move into the storage despite not owning the property
+    const viewKey = await (await bridgePost("/bridge/inventory/view", { playerId: "p-L" })).json();
+    assert.ok(viewKey.containers.some((c: any) => Number(c.id) === prop.storageInventoryId), "key-holder sees property storage");
+    await postAs("/admin/inventory/give", { characterId: charL, itemId: "rp:bandage", quantity: 10 }, ctx.tokenA);
+    const moveInKey = await bridgeJson("/bridge/inventory/move", {
+      playerId: "p-L", itemId: "rp:bandage", quantity: 2, from: "character", to: prop.storageInventoryId,
+    });
+    assert.equal(moveInKey.ok, true);
+    // Leo can toggle the lock for the house he holds the deed to
+    const lockLeo = await bridgeJson("/bridge/property/lock", { playerId: "p-L", propertyId: prop.id, locked: true });
+    assert.equal(lockLeo.ok, true);
+
+    // Leo gets free ownership transfer from Kim (deed moves atomically)
+    const transferToLeo = await bridgeJson("/bridge/property/transfer", { playerId: "p-K", propertyId: prop.id, targetPersistentId: "p-L" });
+    assert.equal(transferToLeo.ok, true);
+    assert.equal(transferToLeo.property.ownerCharacterId, charL);
+    assert.equal(await deedCount(charL, prop.id), 1);
+    assert.equal(await deedCount(charK, prop.id), 0);
+
+    // Leo, now the owner, lists it for sale; show on market
+    const sale = await bridgeJson("/bridge/property/sell", {
+      playerId: "p-L", propertyId: prop.id, priceCents: 400000, currency: "cash",
+    });
+    assert.equal(sale.ok, true);
+    assert.equal(sale.property.salePriceCents, 400000);
+    const shopList = await bridgeJson("/bridge/property/shop", {});
+    assert.ok(shopList.properties.some((p: any) => Number(p.id) === prop.id));
+
+    // transfer is refused while listed
+    assert.equal((await bridgePost("/bridge/property/transfer", {
+      playerId: "p-L", propertyId: prop.id, targetPersistentId: "p-K",
+    })).status, 409);
+    const unlist = await bridgeJson("/bridge/property/sell", {
+      playerId: "p-L", propertyId: prop.id, priceCents: null, currency: "cash",
+    });
+    assert.equal(unlist.property.salePriceCents, null);
+
+    // free transfer back to Kim (same-owner hobby): keys move atomically
+    const transfer = await bridgeJson("/bridge/property/transfer", { playerId: "p-L", propertyId: prop.id, targetPersistentId: "p-K" });
+    assert.equal(transfer.ok, true);
+    assert.equal(transfer.property.ownerCharacterId, charK);
+    assert.equal(await deedCount(charK, prop.id), 1);
+    assert.equal(await deedCount(charL, prop.id), 0);
+
+    // admin: grant to Leo (old owner keys revoked), then seize, then delete
+    assert.equal((await postAs(`/admin/properties/${prop.id}/grant`, { ownerCharacterId: charL }, ctx.tokenA)).status, 200);
+    assert.equal(await deedCount(charK, prop.id), 0);
+    assert.equal(await deedCount(charL, prop.id), 1);
+    assert.equal((await postAs(`/admin/properties/${prop.id}/seize`, {}, ctx.tokenA)).status, 200);
+    assert.equal(await deedCount(charL, prop.id), 0);
+    // seized blocks operations + cannot be granted
+    assert.equal((await bridgePost("/bridge/property/lock", { playerId: "p-K", propertyId: prop.id, locked: false })).status, 409);
+    assert.equal((await postAs(`/admin/properties/${prop.id}/grant`, { ownerCharacterId: charK }, ctx.tokenA)).status, 409);
+    const mineAfterSeize = await bridgeJson("/bridge/property/mine", { playerId: "p-K" });
+    assert.equal(mineAfterSeize.propertyCount, 0);
+    assert.equal(mineAfterSeize.garageCapacity, 3);
+    // admin can still delete (storage + keys cleaned up)
+    assert.equal((await delAs(`/admin/properties/${prop.id}`, ctx.tokenA)).status, 204);
+    assert.equal((await pool.query(`SELECT COUNT(*)::int AS n FROM properties WHERE id = $1`, [prop.id])).rows[0].n, 0);
+    assert.equal((await pool.query(
+      `SELECT COUNT(*)::int AS n FROM inventory_slots WHERE item_id = 'rp:property_key' AND (item_metadata->>'property_id')::bigint = $1`,
+      [prop.id]
+    )).rows[0].n, 0);
+    assert.equal((await pool.query(`SELECT COUNT(*)::int AS n FROM inventories WHERE id = $1`, [prop.storageInventoryId])).rows[0].n, 0);
+
+    // every mutation wrote an audit row (sample assertions)
+    const audits = (await pool.query(
+      `SELECT action, COUNT(*)::int AS n FROM audit_log WHERE target_type = 'property' GROUP BY action`
+    )).rows;
+    const byAction = Object.fromEntries(audits.map((a: any) => [a.action, a.n]));
+    for (const action of [
+      "property.create", "property.buy", "property.lock", "property.sell", "property.listing_remove",
+      "property.transfer", "property.grant", "property.seize", "property.delete",
+    ]) {
+      assert.ok((byAction[action] ?? 0) >= 1, `expected audit rows for ${action}`);
+    }
+  });
+
   // cleanup
   await new Promise<void>((resolve) => ctx.server.close(() => resolve()));
   await pool.end();

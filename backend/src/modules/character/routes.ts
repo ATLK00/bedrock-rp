@@ -19,6 +19,7 @@ import {
 import { getInventory } from "../inventory/index.js";
 import { getWalletAndHistory } from "../economy/index.js";
 import { getGarageSummary as getVehicleGarage } from "../vehicle/index.js";
+import { getPropertySummary } from "../property/index.js";
 import { createCase } from "../cases/index.js";
 
 export const characterRouter = Router();
@@ -233,5 +234,20 @@ characterRouter.get("/vehicles", async (req, res) => {
   if (rows.length === 0) return res.status(404).json({ error: "no character found for this user" });
 
   const summary = await getVehicleGarage(rows[0].id);
+  res.json({ characterId: rows[0].id, ...summary });
+});
+
+/** GET /character/properties — own character's properties/deeds/garage capacity. */
+characterRouter.get("/properties", async (req, res) => {
+  const userId = requireUserId(req, res);
+  if (userId === null) return;
+
+  const { rows } = await pool.query(
+    `SELECT id FROM characters WHERE user_id = $1 AND is_deleted = false`,
+    [userId]
+  );
+  if (rows.length === 0) return res.status(404).json({ error: "no character found for this user" });
+
+  const summary = await getPropertySummary(rows[0].id);
   res.json({ characterId: rows[0].id, ...summary });
 });
