@@ -177,16 +177,22 @@ the rest of the API stays locked down.
 > and the panel app JS auto-redirects there. Open the panel on
 > `http://localhost:8080/` (or whatever matches that env var) — typing
 > `127.0.0.1` still works, it just bounces you to `localhost` first.
+> The OAuth callback also supports `?next=` (a same-origin path) to land
+> a user somewhere specific after login — the admin console uses it to
+> return staff to `/admin`.
 
 ## Admin web
 
 `GET /admin` serves a staff console (same embed-free pattern —
-`backend/src/web/adminWeb.ts`, no static dir, no build step). It is shallow
-sugar over the existing RBAC-guarded `/admin/*` JSON routes: the page shell is
-served anonymously (static, no data, CSP-locked) and boot in the browser; if the
-first API call 401s, the panel shows a Discord login screen. Every data read or
-write still hits `sessionMiddleware` + per-route permission checks, so this is
-authorization-faithful, not a bypass.
+`backend/src/web/adminWeb.ts`, no static dir, no build step). **It is
+admin-only at the server:** `/admin`, `/admin/app.css` and `/admin/app.js`
+all require a valid session holding the `auth.manage` permission (the
+`owner` role and any role granting `auth.manage` pass; anonymous and other
+logged-in users get `401`/`403` before any HTML is served — browsers see a
+readable screen, API clients get JSON). The OAuth login link carries
+`?next=/admin`, and the callback returns the user there after a successful
+login. Every data read/write underneath still passes `sessionMiddleware` +
+its own per-route RBAC check + the admin rate-limiter.
 
 Tabs:
 

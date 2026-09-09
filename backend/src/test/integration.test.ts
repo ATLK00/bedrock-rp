@@ -1212,10 +1212,15 @@ test("integration suite", async (t) => {
 
   // 21. admin web: page + assets + new read-only list endpoints
   await t.test("admin web: page + assets + list endpoints", async () => {
-    // anonymous gets the static shell (no data); JS shows the login screen
+    // the console is admin-only at the server now — anonymous AND any
+    // logged-in non-admin user are rejected before any HTML/JS is served
     const anon = await get("/admin");
-    assert.equal(anon.status, 200);
-    assert.equal((anon.headers.get("content-type") || "").includes("text/html"), true);
+    assert.equal(anon.status, 401);
+    assert.equal((anon.headers.get("content-type") || "").includes("application/json"), true);
+
+    const nonOwner = await getAs("/admin", ctx.tokenB);
+    assert.equal(nonOwner.status, 403);
+    assert.equal((anon.headers.get("content-type") || "").includes("application/json"), true);
 
     const page = await getAs("/admin", ctx.tokenA);
     assert.equal(page.status, 200);
@@ -1231,6 +1236,12 @@ test("integration suite", async (t) => {
     const js = await getAs("/admin/app.js", ctx.tokenA);
     assert.equal(js.status, 200);
     assert.equal((js.headers.get("content-type") || "").includes("javascript"), true);
+
+    // anonymous cannot load admin assets either
+    const anonCss = await get("/admin/app.css");
+    assert.equal(anonCss.status, 401);
+    const anonJs = await get("/admin/app.js");
+    assert.equal(anonJs.status, 401);
 
     // new read-only directories: users + characters
     const users = await (await getAs("/admin/users", ctx.tokenA)).json();

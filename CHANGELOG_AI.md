@@ -50,6 +50,57 @@
 ...
 
 ---
+## [2026-09-09 17:05] — AI: big-pickle (opencode) — Admin console is server-side admin-only + OAuth `?next=` return
+
+### Task
+User: "แอดมินนัมนควรเข้าได้แค่แอดมินดิ" — the admin console page should
+only be reachable by admins, at the server, not just gated in the app JS.
+
+### Changed
+- `backend/src/web/adminWeb.ts` — every `/admin` route (`/`, `/app.css`,
+  `/app.js`) now runs `adminShellGuard` (async, via `hasPermission`) which
+  requires a session holding `auth.manage`. Anonymous or non-admin users are
+  rejected before any HTML/CSS/JS is served. `Accept: text/html` (browser)
+  gets a readable Thai "ต้องเป็นแอดมิน / ไม่มีสิทธิ์ (auth.manage)" page;
+  other clients get `401`/`403` JSON. App JS boots to the same "login as
+  admin" screen (with `?next=/admin`) for the 401 case, and a "ไม่มีสิทธิ์"
+  page for 403.
+- `backend/src/modules/auth/routes.ts` — OAuth login accepts `?next=`; the
+  callback redirects a browser client to that path after a successful login
+  (`AUTH_NEXT_COOKIE`, sanitized: same-origin path only, length-capped, no
+  `//`/backslash — no open redirect). Cleared on consume and on state error.
+- `backend/src/test/integration.test.ts` — admin-web test updated: anon `/admin`
+  → 401 (was 200), non-owner (tokenB) → 403, owner (tokenA) → 200, anon
+  assets → 401.
+- `README.md` / `AI_HANDOFF.md` — documented admin-only behavior + `?next=`.
+
+### Why
+- A shell with no data isn't a real gate — the console should refuse
+  non-admins at the boundary server-side, not rely on the browser JS.
+
+### Tests
+- [PASS] `npm run build` (tsc) clean.
+- [PASS] `npm test` — 23/23.
+- [PASS] Live: `curl /admin` → 401 (html + api), `/admin/app.css|js` → 401,
+  `/player` → 200.
+
+### Security
+- The console no longer ships its markup to anonymous/non-admin users. This
+  is defense-in-depth on top of the existing per-route RBAC + rate limit on
+  the underline `/admin` JSON endpoints. `?next=` is confined to same-origin
+  paths (sanitized) so it cannot be an open-redirect vector.
+
+### Known Issues
+- `?next` only applies to the first hop of the login flow; a page reload
+  mid-flow drops it (state cookie also times out after 10 min). Acceptable.
+
+### Next Steps
+- User: real-browser pass of `/admin` as staff; push the repo remote to run
+  CI (still no remote configured / no `gh` CLI).
+
+### Handoff Notes
+- Committed as the next commit after Round 4; see `git log`.
+
 ## [2026-09-09 16:40] — AI: big-pickle (opencode) — OAuth state host-mismatch fix (127.0.0.1 vs localhost) + readable callback error
 
 ### Task

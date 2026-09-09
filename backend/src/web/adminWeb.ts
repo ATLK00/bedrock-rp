@@ -1,5 +1,6 @@
-import { Router } from "express";
+import { Router, type Request, type Response, type NextFunction } from "express";
 import { config } from "../config/index.js";
+import { hasPermission } from "../rbac/index.js";
 import { WEB_CSP } from "./playerWeb.js";
 
 /**
@@ -678,8 +679,8 @@ const APP_JS = `
   async function boot() {
     var me = await api("/admin/presence/online");
     if (me.status === 401) {
-      app.innerHTML = "<div class=\\"card center\\"><h1>ต้องล็อกอินก่อน</h1><p class=\\"muted\\">ล็อกอินด้วย Discord แล้วกลับมาที่นี่</p>" +
-        "<a class=\\"btn primary\\" href=\\"/auth/discord/login\\">Login with Discord</a></div>";
+      app.innerHTML = "<div class=\\"card center\\"><h1>ต้องเป็นแอดมินก่อน</h1><p class=\\"muted\\">แผงนี้ใช้ได้สำหรับผู้ดูแลระบบเท่านั้น — ล็อกอินด้วย Discord ที่เป็นแอดมินแล้วกลับมาที่นี่</p>" +
+        "<a class=\\"btn primary\\" href=\\"/auth/discord/login?next=" + encodeURIComponent(location.pathname + location.search) + "\\">Login with Discord</a></div>";
       return;
     }
     if (me.status === 403) {
@@ -695,22 +696,66 @@ const APP_JS = `
 
 export const adminWebRouter = Router();
 
-// The page shell is served anonymously (static, no data, CSP-locked) —
-// the app JS boots into a login screen when its first API call 401s, same
-// pattern as the player panel. Every data call still has to pass the
-// RBAC-guarded /admin JSON routes, so this adds no authorization bypass.
+// The admin console is admin-only at the server: /admin, /admin/app.css and
+// /admin/app.js each require a valid session HOLDING auth.manage (the owner
+// role and any role granting auth.manage pass). The app JS also draws a
+// "login as admin" screen on the first 401, but it can never gate a
+// non-owner — the real boundary is this guard below + the RBAC-guarded
+// /admin JSON routes.
 
-adminWebRouter.get("/", (_req, res) => {
+// Browser navigation (Accept: text/html) gets a human-facing screen; API
+// clients (irregular fetches / asset loads) get plain JSON. Both carry the
+// same status codes (401/403) by auth state, so the JS is still aware.
+async function adminShellGuard(req: Request, res: Response, next: NextFunction) {
+  const userId = (req as any).userId as number | undefined;
+  if (typeof userId !== "number") {
+    if ((req.headers.accept ?? "").includes("text/html")) {
+      return res
+        .status(401)
+        .setHeader("Content-Security-Policy", WEB_CSP)
+        .type("html")
+        .send(
+          `<!doctype html><html lang="th"><head><meta charset="utf-8">` +
+            `<title>ต้องเป็นแอดมิน</title></head>` +
+            `<body style="font-family:system-ui;background:#101317;color:#e6e6e6;padding:24px">` +
+            `<h1>ต้องเป็นแอดมินก่อน</h1>` +
+            `<p>แผงนี้ใช้ได้สำหรับผู้ดูแลระบบเท่านั้น. <a href="/auth/discord/login?next=/admin">ล็อกอินด้วย Discord</a></p>` +
+            `</body></html>`
+        );
+    }
+    return res.status(401).json({ error: "unauthenticated" });
+  }
+  const ok = await hasPermission(userId, "auth.manage");
+  if (!ok) {
+    if ((req.headers.accept ?? "").includes("text/html")) {
+      return res
+        .status(403)
+        .setHeader("Content-Security-Policy", WEB_CSP)
+        .type("html")
+        .send(
+          `<!doctype html><html lang="th"><head><meta charset="utf-8">` +
+            `<title>ไม่มีสิทธิ์</title></head>` +
+            `<body style="font-family:system-ui;background:#101317;color:#e6e6e6;padding:24px">` +
+            `<h1>ไม่มีสิทธิ์ (auth.manage)</h1>` +
+            `<p>บัญชีนี้ไม่ใช่ผู้ดูแลระบบ</p></body></html>`
+        );
+    }
+    return res.status(403).json({ error: "forbidden", required: "auth.manage" });
+  }
+  next();
+}
+
+adminWebRouter.get("/", adminShellGuard, (_req, res) => {
   res.setHeader("Content-Security-Policy", WEB_CSP);
   res.type("html").send(INDEX_HTML(CANONICAL_ORIGIN));
 });
 
-adminWebRouter.get("/app.css", (_req, res) => {
+adminWebRouter.get("/app.css", adminShellGuard, (_req, res) => {
   res.setHeader("Content-Security-Policy", WEB_CSP);
   res.type("css").send(APP_CSS);
 });
 
-adminWebRouter.get("/app.js", (_req, res) => {
+adminWebRouter.get("/app.js", adminShellGuard, (_req, res) => {
   res.setHeader("Content-Security-Policy", WEB_CSP);
   res.type("js").send(APP_JS);
 });

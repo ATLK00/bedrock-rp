@@ -7,6 +7,26 @@
   real infrastructure; a small set of infrastructure-dependent paths remains
   explicitly unverified (listed below under **Unverified**).
 
+## 2026-09-09 Round 5 — admin console is now server-side admin-only + `?next=` login return
+
+- User: "แอดมินนัมนควรเข้าได้แค่แอดมินดิ" (the admin console should only
+  be openable by admins). The `/admin` SPA previously served its static
+  shell anonymously (JS gated the data). Now **all three `/admin` routes
+  (`/`, `/app.css`, `/app.js`) require a valid session holding `auth.manage`**
+  at the server (`adminShellGuard` → `hasPermission`). Anonymous and
+  logged-in-but-not-admin users get `401`/`403` before any HTML/JS/CSS is
+  served; browsers (Accept: text/html) get a readable "ต้องเป็นแอดมิน /
+  ไม่มีสิทธิ์ (auth.manage)" screen, API clients get JSON. The player panel
+  `/player` is unchanged (200 for anonymous).
+- OAuth `?next=` return path: login now accepts `?next=/admin` and the
+  callback redirects the browser back there after a successful login
+  (`AUTH_NEXT_COOKIE`, sanitized to a same-origin path only — no open
+  redirect; cleared on consume/state-error). Admin boot screen uses it so a
+  staff user who lands logged-out ends up back at `/admin`.
+- Suite stays **23/23** (admin-web test tightened to assert 401 anon / 403
+  non-owner / 200 owner on the shell + 401 assets for anon). Live-verified:
+  `curl /admin` → 401 (both html and api accept), assets 401, `/player` 200.
+
 ## 2026-09-09 Round 4 — OAuth state host-mismatch fix + friendly error (HEAD; committed as the next commit)
 
 - **The first real-browser login attempt hit `{"error":"invalid state"}`**

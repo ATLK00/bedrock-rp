@@ -16,6 +16,15 @@ function generateOAuthState(): { value: string; expiresAt: number } {
 }
 
 const AUTH_STATE_COOKIE = "bedrock_rp_oauth_state";
+const AUTH_NEXT_COOKIE = "bedrock_rp_oauth_next";
+
+// Only ever redirect back to a local path after login (never an open
+// redirect): must start with "/", not start with "//", no backslash.
+function sanitizeNext(v: unknown): string {
+  if (typeof v !== "string" || v.length === 0 || v.length > 200) return "/player";
+  if (!v.startsWith("/") || v.startsWith("//") || v.includes("\\")) return "/player";
+  return v;
+}
 
 // State-cookie failure rendered for browsers: the #1 cause is opening the
 // panel on a different host than the registered DISCORD_REDIRECT_URI (a
@@ -24,6 +33,7 @@ const AUTH_STATE_COOKIE = "bedrock_rp_oauth_state";
 // the canonical origin, but a direct callback hit still deserves a readable
 // hint instead of a bare JSON body. API clients keep the machine format.
 function stateErrorResponse(req: Request, res: Response) {
+  res.clearCookie(AUTH_NEXT_COOKIE);
   if ((req.headers.accept ?? "").includes("text/html")) {
     const uri = config.DISCORD_REDIRECT_URI;
     if (!uri) return res.status(400).json({ error: "invalid state" });
@@ -41,7 +51,7 @@ function stateErrorResponse(req: Request, res: Response) {
   return res.status(400).json({ error: "invalid state" });
 }
 
-authRouter.get("/discord/login", (_req, res) => {
+authRouter.get("/discord/login", (req, res) => {
   if (!config.DISCORD_CLIENT_ID || !config.DISCORD_REDIRECT_URI) {
     return res.status(500).json({ error: "Discord OAuth2 not configured" });
   }
@@ -52,6 +62,14 @@ authRouter.get("/discord/login", (_req, res) => {
     sameSite: "lax",
     maxAge: 10 * 60 * 1000,
   });
+  if (req.query.next !== undefined) {
+    res.cookie(AUTH_NEXT_COOKIE, sanitizeNext(req.query.next), {
+      httpOnly: true,
+      secure: config.NODE_ENV === "production",
+      sameSite: "lax",
+      maxAge: 10 * 60 * 1000,
+    });
+  }
   const params = new URLSearchParams({
     client_id: config.DISCORD_CLIENT_ID,
     redirect_uri: config.DISCORD_REDIRECT_URI,
@@ -99,11 +117,14 @@ authRouter.get("/discord/callback", async (req, res) => {
     const user = await exchangeDiscordCode(code);
     const token = await issueSessionToken(user.id);
     setSessionCookie(res, token);
-    // Browser navigation (the Player Web login flow) lands on the panel;
-    // API clients that fetched this endpoint with a JSON accept header
-    // still get the machine-readable body.
+    // Browser navigation (the Player Web login flow) lands on the panel —
+    // or the local path requested via ?next= (used by /admin, which is
+    // gated). API clients that fetched this endpoint with a JSON accept
+    // header still get the machine-readable body.
     if ((req.headers.accept ?? "").includes("text/html")) {
-      return res.redirect("/player");
+      const next = req.cookies?.[AUTH_NEXT_COOKIE];
+      res.clearCookie(AUTH_NEXT_COOKIE);
+      return res.redirect(sanitizeNext(next));
     }
     res.json({ ok: true, discordTag: user.discord_tag });
   } catch (err: any) {
