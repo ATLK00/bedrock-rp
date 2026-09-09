@@ -329,8 +329,8 @@ async function openRefuel(player, deps, persistentId, v) {
   }
   const form = new ModalFormData()
     .title(`เติมน้ำมัน ${v.plate}`)
-    .slider("จำนวนหน่วย", 1, maxUnits, 1, Math.min(maxUnits, 50))
-    .dropdown("ชำระด้วย", ["เงินสด (cash)", "แบงก์ (bank)", "เงินแดง (red_money)"], 0);
+    .slider("จำนวนหน่วย", 1, maxUnits, { valueStep: 1, defaultValue: Math.min(maxUnits, 50) })
+    .dropdown("ชำระด้วย", ["เงินสด (cash)", "แบงก์ (bank)", "เงินแดง (red_money)"], { defaultValueIndex: 0 });
   const resp = await showOnMainThread(player, form);
   if (resp.canceled) return;
   const [units, currencyIdx] = resp.formValues;
@@ -371,7 +371,7 @@ async function openSell(player, deps, persistentId, v) {
   const form = new ModalFormData()
     .title(`ขาย ${v.plate}`)
     .textField("ราคา (สตางค์ เช่น 100000 = 1,000 ฿)", "ใส่ตัวเลขเท่านั้น")
-    .dropdown("รับเงิน", ["เงินสด (cash)", "แบงก์ (bank)", "เงินแดง (red_money)"], 0);
+    .dropdown("รับเงิน", ["เงินสด (cash)", "แบงก์ (bank)", "เงินแดง (red_money)"], { defaultValueIndex: 0 });
   const resp = await showOnMainThread(player, form);
   if (resp.canceled) return;
   const [rawPrice, currencyIdx] = resp.formValues;
@@ -412,7 +412,7 @@ async function openTransfer(player, deps, persistentId, v) {
   }
   const form = new ModalFormData()
     .title(`โอน ${v.plate}`)
-    .dropdown("ผู้เล่นที่จะรับ (ต้องออนไลน์อยู่)", others, 0);
+    .dropdown("ผู้เล่นที่จะรับ (ต้องออนไลน์อยู่)", others, { defaultValueIndex: 0 });
   const resp = await showOnMainThread(player, form);
   if (resp.canceled) return;
   const targetName = others[resp.formValues[0]];
@@ -459,7 +459,7 @@ async function openShop(player, deps, persistentId) {
   const v = listing[resp.selection];
   const confirm = new ModalFormData()
     .title(`ซื้อ ${v.plate}`)
-    .toggle(`จ่าย ${money(v.salePriceCents)} ${v.saleCurrency} จากกระเป๋า (wallet)`, false);
+    .toggle(`จ่าย ${money(v.salePriceCents)} ${v.saleCurrency} จากกระเป๋า (wallet)`, { defaultValue: false });
   const confirmResp = await showOnMainThread(player, confirm);
   if (confirmResp.canceled || !confirmResp.formValues[0]) return;
 
