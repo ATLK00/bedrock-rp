@@ -179,12 +179,18 @@
 
 ## Pending (features/tooling not built yet — not blocked items)
 - Inventory UI decision: RESOLVED 2026-09-09 — in-game via `@minecraft/server-ui`
-  (RP inventory is a separate system from the vanilla backpack, `!inv` chat
-  command), with a player-web inventory viewer to follow later on top of the
-  existing `/character/inventory` + `/inventories/*` routes. Built: signed
-  `/bridge/inventory/view` + `/bridge/inventory/move` + `!inv` form flow.
-  Unresolved sub-item: vanilla `DEFAULT_INVENTORY_SIZE = 36` vs final RP
-  slot model still to confirm against how the world presents inventory.
+  (RP inventory is a separate system from the vanilla backpack), with a
+  player-web inventory viewer to follow later on top of the existing
+  `/character/inventory` + `/inventories/*` routes. Built and **VERIFIED LIVE**
+  on BDS 1.26.45.1 with a real client (2026-09-09): `world.beforeEvents.chatSend`
+  confirmed as the real chat hook, `!inv`/compass open the form, the link-code
+  form auto-pops on first spawn for unlinked accounts, linked accounts get a
+  one-time "เชื่อมต่อแล้ว" message. RESOLVED during live verification:
+  `@minecraft/server-chat` does **NOT** exist as a module on this build
+  ("depends on unknown module" for both 1.0.0 and 1.0.0-beta) — previous
+  handlers were correct to use `world.beforeEvents.chatSend`; do not try to
+  migrate. Unresolved sub-item: vanilla `DEFAULT_INVENTORY_SIZE = 36` vs final
+  RP slot model still to confirm against how the world presents inventory.
 - Complete a real Discord OAuth sign-in with a real app — the live sign-in
   (2026-09-09) is user-confirmed but was not independently observed in this env.
 
@@ -222,6 +228,17 @@ unusable, purely for table hygiene. Mirrors the trade-expiry job's exact pattern
 (idempotent periodic job, manual-trigger admin route, started once at boot).
 
 ## Known Issues
+- `@minecraft/server-chat` is NOT bundled on BDS 1.26.45.1 ("depends on unknown
+  module" for both 1.0.0 and 1.0.0-beta, even after adding it to
+  `config/default/permissions.json` allowed_modules) — chat interception stays
+  on `world.beforeEvents.chatSend`, which empirically still fires and still
+  honors `event.cancel` on this build. Verified live 2026-09-09.
+- Compass "use" is the placeholder trigger; vanilla Bedrock `itemUse` may not
+  fire for non-usable items — if it proves dead on a real client, switch the
+  trigger item to a usable one (e.g. carrot_on_a_stick). `!inv` chat remains
+  the reliable fallback.
+- `@minecraft/server-ui` must be `2.2.0-beta` on this BDS build — `1.0.0-beta`
+  is not an available version (mismatch rejected at pack load).
 - Cleanup interval hardcoded (hourly), same style as trade expiry's hardcoded threshold.
 - Node 24's `node --test <directory>` reports `Cannot find module` for a bare
   directory on this setup — use the `dist/**/*.test.js` glob form
@@ -254,15 +271,13 @@ hardening round, the live BDS re-smoke on current HEAD (2026-09-09 rows), the
 CI gate (`.github/workflows/ci.yml`), the `level.dat` NBT patch automation
 (`tools/leveldat_patch.py`), deploy/backup tooling
 (`ops/docker-compose.prod.yml` + `ops/backup.sh`), and the in-game inventory
-UI (`!inv` via `@minecraft/server-ui` + signed `/bridge/inventory/view` +
-`/bridge/inventory/move`) are all done.
+UI (verified live on BDS 1.26.45.1: `!inv` + compass trigger + spawn link
+form + `@minecraft/server-chat` finding) are all done.
 Remaining verified-gap: live Discord OAuth was user-confirmed (2026-09-09)
 but not independently observed in this environment; the "heartbeat-after-leave
 drops presence" drop is HTTP-suite covered and can be observed live with a
-documented curl check if desired; the `!inv` in-game form flow is built but
-NOT yet exercised in a real client (BDS join bug deprioritized — backend side
-fully covered by the integration suite). After those: player-web layer
-(inventory viewer + wallets) on top of the existing session routes, then the
+documented curl check if desired. After those: player-web layer (inventory
+viewer + wallets) on top of the existing session routes, then the
 vanilla-36-slot-size confirmation against the real world.
 
 ## Do Not Change

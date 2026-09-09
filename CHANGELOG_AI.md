@@ -50,6 +50,101 @@
 ...
 
 ---
+## [2026-09-09 15:30] — AI: big-pickle (opencode) — In-game inventory UI verified live on BDS 1.26.45.1 + spawn link form + compass trigger
+
+### Task
+Finish the in-game inventory UI round against the user's real BDS (1.26.45.1,
+WSL2): prove the pack's chat hook actually works on this build, then reshape
+the flow per user request — auto-pop the link-code form for accounts that
+haven't linked yet, show a one-time "เชื่อมต่อแล้ว" confirmation for linked
+accounts, and open the backpack by "using" an item (compass) instead of only
+a chat command.
+
+### Changed
+- `behavior_pack/manifest.json` — `@minecraft/server-ui` fixed to `2.2.0-beta`
+  (`1.0.0-beta` is not an available version on this BDS — reject differs). No
+  `@minecraft/server-chat` dependency: it is NOT bundled on 1.26.45.1
+  ("depends on unknown module" for both `1.0.0` and `1.0.0-beta`, even with
+  `config/default/permissions.json` allowed_modules updated).
+- `behavior_pack/scripts/main.js` —
+  - Import + subscribe cast: chat interception stays on
+    `world.beforeEvents.chatSend` (empirically fires and honors `event.cancel`
+    on this build; instrumentation removed after confirmation).
+  - `world.afterEvents.itemUse` compass trigger → `openInventoryUi` (fixed a
+    missing-import ReferenceError observed live at main.js:249).
+  - `world.afterEvents.playerSpawn` (initial spawn only) → checks the backend:
+    unlinked → link-code form pops automatically; linked → "§aเชื่อมต่อแล้ว"
+    message. Guarded by a `linkStatusNotified` Set (reset on leave) because
+    Bedrock's playerSpawn can fire twice around a join — the message/form
+    appears exactly once per entry.
+- `behavior_pack/scripts/inventory_ui.js` —
+  - `openInventoryUi` now pops `openLinkForm` on the 404 (not-linked) case
+    instead of only an error message, and opens the root form silently (no
+    "connected" spam on every backpack open).
+  - New `openLinkForm`: ModalFormData with a code text field, consumes it via
+    the same `/bridge/character/link` + persistentId call as `!link <code>`,
+    shows "§aเชื่อมต่อแล้ว" on success then opens the inventory.
+  - New exported `promptJoinLinkStatus` for the spawn hook (linked → one-time
+    "เชื่อมต่อแล้ว"; unlinked → form; backend hiccups stay quiet).
+- `README.md` — Inventory section: compass use (primary) + `!inv` fallback,
+  spawn link-form behavior, one-time "เชื่อมต่อแล้ว", live-verified chat hook.
+- `AI_HANDOFF.md` — inventory UI sub-item marked VERIFIED LIVE; new Known
+  Issues for `@minecraft/server-chat` absence, compass `itemUse` caveat, and
+  the server-ui `2.2.0-beta` requirement; Next Recommended Task updated.
+
+### Why
+The docs said chat handling moved to `@minecraft/server-chat`, but that module
+does not exist on this BDS build — the error trail (invalid version → unknown
+module, whichever version we tried) disproved the docs migration path and
+live logs confirmed the original `world.beforeEvents.chatSend` hook both fires
+and cancels. With interception proven, the remaining work was the UX the user
+asked for (auto link form on join, one-time connected message, item-use
+trigger) plus closing out the round with docs + commit.
+
+### Tests
+- [PASS] `npm run build` (tsc) clean.
+- [PASS] `npm test` — 21/21 on the docker stack (postgres/redis healthy).
+- [PASS] `node --check` on main.js + inventory_ui.js (ESM syntax).
+- [PASS] Live BDS 1.26.45.1: pack loads clean (`behavior pack loaded`), real
+  player K2SirLao connects/spawns, `world.beforeEvents.chatSend` fires for
+  `!inv`/`!link`/typos, server-ui form APIs in use load with the `2.2.0-beta`
+  dependency. Fixed live: ReferenceError `openInventoryUi is not defined`
+  (missing import — observed in the BDS console at main.js:249).
+- [THROWAWAY] One `@minecraft/server-chat` boot with the dependency present
+  FAILED to create a scripting context ("depends on unknown module") — reverted
+  and removed it; kept as a Known Issue for future BDS versions.
+
+### Security
+- No new surface: chat hook verified to actually cancel before broadcast
+  (`event.cancel` works on this build); the link form consumes the same
+  signed `/bridge/character/link` endpoint as `!link <code>`; identity is the
+  join-captured persistentId, never client-supplied.
+- The spawn check leaks no data: unlinked 404 → form only; other errors/200 →
+  silent; a linked account is only told "เชื่อมต่อแล้ว" (no inventory data in
+  the message).
+
+### Known Issues
+- `@minecraft/server-chat` absent on BDS 1.26.45.1 — keep
+  `world.beforeEvents.chatSend`; re-check before upgrading BDS.
+- Compass may not fire `itemUse` (vanilla items without a use action); if it
+  does nothing live, swap the trigger item and keep `!inv` as fallback.
+- `DEFAULT_INVENTORY_SIZE = 36` vanilla-slot assumption still unconfirmed
+  against the real world.
+
+### Next Steps
+- Player-web layer (inventory viewer + wallets) on existing session routes.
+- Confirm vanilla 36-slot size when a real world is reachable.
+- Push repo to a remote so `.github/workflows/ci.yml` runs.
+
+### Handoff Notes
+- Deploy order for the live pack: copy `manifest.json` + `scripts/*.js` into
+  `~/bds/behavior_packs/bedrock-rp-core/`, `killall -9 bedrock_server`, then
+  start — manifest + chat module changes only take effect on full restart.
+- `config/default/permissions.json` allowed_modules needs
+  `@minecraft/server-chat` only if a future BDS actually ships it.
+
+---
+
 ## [2026-09-09 12:50] — AI: big-pickle (opencode) — In-game RP inventory UI (!inv via server-ui) + signed bridge inventory endpoints
 
 ### Task

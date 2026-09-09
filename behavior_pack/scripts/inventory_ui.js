@@ -92,7 +92,12 @@ function containerLabel(c) {
 
 /**
  * Root screen: personal carry (slots) + owned containers. Exported so
- * main.js can open it on `!inv`. `deps` = { postToBackend, getPersistentId }.
+ * main.js can open it from the compass item ("use" on a compass) or via
+ * the `!inv` chat fallback. `deps` = { postToBackend, getPersistentId, isConfigured }.
+ *
+ * Not linked yet (backend 404) -> pops the link-code form instead of just
+ * an error: player types the code from the website right there. Linked ->
+ * confirms with "เชื่อมต่อสำเร็จ" and opens the inventory.
  */
 export async function openInventoryUi(player, deps) {
   if (!deps.isConfigured()) {
@@ -107,10 +112,62 @@ export async function openInventoryUi(player, deps) {
 
   const view = await fetchView(deps.postToBackend, persistentId);
   if (!view.ok) {
+    if (view.status === 404) {
+      await openLinkForm(player, deps, persistentId);
+      return;
+    }
     sendMsg(player, `§c${view.message}`);
     return;
   }
   await renderRoot(player, deps, persistentId, view);
+}
+
+/**
+ * On first join: already linked -> says "เชื่อมต่อแล้ว", not linked yet ->
+ * pops the code-entry form automatically (no command / item needed).
+ * Backend hiccups / non-404 errors stay quiet so we don't nag.
+ */
+export async function promptJoinLinkStatus(player, deps) {
+  if (!deps.isConfigured()) return;
+  const persistentId = deps.getPersistentId();
+  if (!persistentId) return;
+  const view = await fetchView(deps.postToBackend, persistentId);
+  if (view.ok) {
+    sendMsg(player, "§aเชื่อมต่อแล้ว");
+    return;
+  }
+  if (view.status !== 404) return;
+  await openLinkForm(player, deps, persistentId);
+}
+
+/**
+ * Modal asking for the link code from the website, then consumes it the
+ * same way as the `!link <code>` chat command. On success says "เชื่อมต่อแล้ว"
+ * and re-opens the inventory so the connected state is visible immediately.
+ */
+async function openLinkForm(player, deps, persistentId) {
+  const form = new ModalFormData()
+    .title("ลิงก์บัญชี RP")
+    .textField("Code จากเว็บ", "วาง code ที่นี่");
+  const resp = await showOnMainThread(player, form);
+  if (resp.canceled) return;
+  const [rawCode] = resp.formValues;
+  const code = String(rawCode ?? "").trim();
+  if (!code) {
+    sendMsg(player, "§cต้องใส่ code ก่อน — เอาจากเว็บหลังล็อกอิน Discord ครับ");
+    return;
+  }
+
+  const result = await bridgeCall(deps.postToBackend, "/bridge/character/link", { code, xuid: persistentId });
+  if (!result.ok) {
+    sendMsg(player, `§c${result.message}`);
+    return;
+  }
+  sendMsg(player, "§aเชื่อมต่อแล้ว");
+
+  const view = await fetchView(deps.postToBackend, persistentId);
+  if (view.ok) await renderRoot(player, deps, persistentId, view);
+  else sendMsg(player, `§c${view.message}`);
 }
 
 /** Reusable render loop for the root form. */

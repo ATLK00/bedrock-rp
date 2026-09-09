@@ -3,7 +3,7 @@ import { beforeEvents as adminBeforeEvents } from "@minecraft/server-admin";
 import { http, HttpRequest, HttpRequestMethod, HttpHeader } from "@minecraft/server-net";
 import { getBridgeConfig } from "./bridgeConfig.js";
 import { hmacSha256Hex } from "./crypto_hmac.js";
-import { tryOpenInventoryUi } from "./inventory_ui.js";
+import { openInventoryUi, tryOpenInventoryUi, promptJoinLinkStatus } from "./inventory_ui.js";
 
 /**
  * IDENTITY NOTE: `world.afterEvents.playerJoin`'s `event.playerId` is
@@ -25,6 +25,13 @@ import { tryOpenInventoryUi } from "./inventory_ui.js";
  * /bridge/character/link) is kept unchanged for compatibility.
  */
 const persistentIdByName = new Map();
+
+/**
+ * Bedrock's playerSpawn can fire more than once around a join, so gate the
+ * join greeting ("เชื่อมต่อแล้ว" / link-code form) to exactly once per
+ * player per entry — reset on leave so a rejoin gets its one message again.
+ */
+const linkStatusNotified = new Set();
 
 /**
  * Cached once at load time. `world.beforeEvents.chatSend`'s callback
@@ -108,6 +115,7 @@ world.afterEvents.playerJoin.subscribe((event) => {
 });
 
 world.afterEvents.playerLeave.subscribe((event) => {
+  linkStatusNotified.delete(event.playerName); // rejoin should get its one message again
   if (cachedBridgeConfig) {
     const persistentId = persistentIdByName.get(event.playerName);
     if (persistentId) {
@@ -153,11 +161,11 @@ system.runInterval(() => {
 }, 30 * 20); // 30 seconds (script ticks run ~20/sec)
 
 /**
- * `!link <code>` — player types this in chat after requesting a code on
- * the web (POST /character/link-code while logged in). We intercept the
- * chat message before it's broadcast (cancel it so other players don't
- * see codes/failed attempts in public chat), then call the backend to
- * consume the code and tie this player's persistentId to their character.
+ * NOTE (BDS 1.26.45.1): verified empirically that `world.beforeEvents.chatSend`
+ * still fires AND `event.cancel` still suppresses the broadcast on this build —
+ * the standalone `@minecraft/server-chat` module is NOT bundled here
+ * ("depends on unknown module" for both 1.0.0 and 1.0.0-beta), so this is the
+ * one true chat hook. Do not "migrate" to @minecraft/server-chat on 1.26.
  *
  * A leading `/` is deliberately NOT used as the trigger — Minecraft
  * intercepts any `/`-prefixed chat message as an attempted game command
@@ -215,6 +223,43 @@ world.beforeEvents.chatSend.subscribe((event) => {
       console.warn(`[bedrock-rp] link request failed: ${err}`);
     }
   );
+});
+
+/**
+ * First spawn only: already linked -> "เชื่อมต่อแล้ว", not linked yet -> the
+ * code form pops automatically (whole "เข้าซิฟแล้วกรอกโค้ด" flow). `deps` a
+ * bove. Short delay so the client has actually finished spawning first.
+ */
+world.afterEvents.playerSpawn.subscribe((event) => {
+  if (!event.initialSpawn || !cachedBridgeConfig) return;
+  if (linkStatusNotified.has(event.player.name)) return; // spawn may fire twice around a join
+  linkStatusNotified.add(event.player.name);
+  const persistentId = persistentIdByName.get(event.player.name);
+  if (!persistentId) return;
+  system.runTimeout(() => {
+    promptJoinLinkStatus(event.player, {
+      postToBackend,
+      getPersistentId: () => persistentId,
+      isConfigured: () => !!cachedBridgeConfig,
+    });
+  }, 40); // ~2s after spawn
+});
+
+/**
+ * RP inventory opener via ITEM USE (right-click "use" on a compass) —
+ * placeholder trigger item for now, per the player-side preference. Same
+ * deps + flow as the `!inv` chat fallback above. NOTE: vanilla Bedrock
+ * `itemUse` fires for items with a use action; a plain compass is not one,
+ * so if right-clicking it does nothing live we switch to a usable item
+ * (e.g. carrot_on_a_stick) — `!inv` remains as the reliable fallback meanwhile.
+ */
+world.afterEvents.itemUse.subscribe((event) => {
+  if (!event.itemStack || event.itemStack.typeId !== "minecraft:compass") return;
+  openInventoryUi(event.source, {
+    postToBackend,
+    getPersistentId: () => persistentIdByName.get(event.source.name),
+    isConfigured: () => !!cachedBridgeConfig,
+  });
 });
 
 system.run(() => {

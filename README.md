@@ -158,12 +158,20 @@ seeded by `004_seed_items.sql` for testing; real item catalog design is
 future work.
 
 In-game UI (behavior pack, `@minecraft/server-ui`): players open the RP
-inventory — a separate system from the vanilla backpack — by typing `!inv`
-in chat (`!inventory` / `!bag` also work). It lists the character's carried
-slots + owned containers with weights, and moves items between them. All
+inventory — a separate system from the vanilla backpack — by right-clicking
+("use") a **compass** (placeholder trigger item; `!inv` / `!inventory` /
+`!bag` in chat work as a fallback). It lists the character's carried slots +
+owned containers with weights, and moves items between them. All
 reads/writes go through the signed bridge endpoints below; identity is the
 player's persistentId (no client-supplied character id), and containers
 belonging to someone else return `403`.
+
+On first spawn each entry, the pack checks the backend: an account that
+isn't linked pops the link-code form automatically; a linked one gets a
+single "เชื่อมต่อแล้ว" confirmation (won't nag again until they leave and
+rejoin). Verified live on BDS 1.26.45.1 with a real client (chat interception
+still works via `world.beforeEvents.chatSend` — the `@minecraft/server-chat`
+module is NOT bundled on this build, do not migrate to it).
 
 - `POST /bridge/inventory/view` `{playerId}` — character slots + carry
   weight/limit + owned containers (with contents + used weight). `404`
