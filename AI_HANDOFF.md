@@ -133,9 +133,15 @@
   Session 5 = join after `!link` → `character_id` auto-filled to 3, then closed
   (`left_at` set). Session 6 = **rejoin WITHOUT `!link`** → opened with
   `character_id = 3` again and `left_at = NULL`, heartbeat advanced
-  `last_seen_at` (~19:30) until leave, then closed (`left_at` set). This closes
+  `last_seen_at` (~19:30) until leave, then closed (`left_at` set). Later in the
+  same window: session 7 (joined 19:31:11 right after session 6 left at 19:30:24,
+  heartbeat trail to 19:39:47, closed 19:41:26) and session 8 (joined 19:41:26 —
+  the exact ms session 7 closed — closed 19:41:47). Across all cycles: no
+  overlapping open window (each opens only after the previous `left_at`),
+  `character_id` auto-bound to 3 throughout, `left_at` always set — consecutive
+  leave→rejoin persistence confirmed repeatedly. This closes
   join/presence/heartbeat/session-rotation/leave, `!link` consume, persistent-id
-binding, character-session-resolve, and leave→rejoin persistence. The only
+  binding, character-session-resolve, and leave→rejoin persistence. The only
   live re-smoke still pending: the stale-heartbeat guard + concurrent-join
   changes added in the 2026-09-09 round (the evidence above is dated
   2026-09-08, i.e. before that round).
