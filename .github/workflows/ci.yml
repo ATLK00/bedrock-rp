@@ -13,25 +13,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
-    services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_USER: bedrock_rp
-          POSTGRES_PASSWORD: changeme
-          POSTGRES_DB: bedrock_rp
-        options: >-
-          --health-cmd "pg_isready -U bedrock_rp"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
-      redis:
-        image: redis:7
-        options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
+    # NOTE: we deliberately start postgres + redis with `docker run
+    # --network host` instead of GitHub's `services:` block. The service
+    # hostnames (postgres/redis) resolved through the job DNS were flaky
+    # here (getaddrinfo EAI_AGAIN, every couple minutes) — the runner's
+    # service-name DNS alias does not stay resolvable on this infra. Host
+    # networking gives us plain localhost URLs and no DNS dependency.
 
     steps:
       - name: Checkout
@@ -44,6 +31,26 @@ jobs:
           cache: npm
           cache-dependency-path: backend/package-lock.json
 
+      - name: Start dependencies (docker, host network)
+        run: |
+          set -e
+          docker run -d --name bedrock-rp-postgres --network host \
+            -e POSTGRES_USER=bedrock_rp \
+            -e POSTGRES_PASSWORD=changeme \
+            -e POSTGRES_DB=bedrock_rp \
+            postgres:16
+          docker run -d --name bedrock-rp-redis --network host redis:7
+          for i in $(seq 1 30); do
+            if docker exec bedrock-rp-postgres pg_isready -U bedrock_rp >/dev/null 2>&1 \
+               && docker exec bedrock-rp-redis redis-cli ping | grep -q PONG; then
+              echo "dependencies ready after $((i * 2))s"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "dependencies never became ready" >&2
+          exit 1
+
       - name: Install dependencies
         working-directory: backend
         run: npm ci
@@ -55,9 +62,9 @@ jobs:
       - name: Integration suite (build + migrate + 20/20)
         working-directory: backend
         env:
-          CI_TEST_DB_URL: postgres://bedrock_rp:changeme@postgres:5432/bedrock_rp_test
-          CI_ADMIN_DB_URL: postgres://bedrock_rp:changeme@postgres:5432/bedrock_rp
-          CI_REDIS_URL: redis://redis:6379
+          CI_TEST_DB_URL: postgres://bedrock_rp:changeme@localhost:5432/bedrock_rp_test
+          CI_ADMIN_DB_URL: postgres://bedrock_rp:changeme@localhost:5432/bedrock_rp
+          CI_REDIS_URL: redis://localhost:6379
         run: npm test
 
   nbt-patch:

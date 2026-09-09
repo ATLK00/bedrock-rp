@@ -55,7 +55,7 @@ async function waitForPostgres(url: string, attempts = 30) {
       const parsed = new URL(url);
       const { lookup } = await import("node:dns/promises");
       await lookup(parsed.hostname);
-      const client = new pg.Client({ connectionString: url });
+      const client = new pg.Client({ connectionString: url, connectionTimeoutMillis: 5000 });
       await client.connect();
       await client.end();
       return;
