@@ -141,21 +141,35 @@
   `character_id` auto-bound to 3 throughout, `left_at` always set — consecutive
   leave→rejoin persistence confirmed repeatedly. This closes
   join/presence/heartbeat/session-rotation/leave, `!link` consume, persistent-id
-  binding, character-session-resolve, and leave→rejoin persistence. The only
-  live re-smoke still pending: the stale-heartbeat guard + concurrent-join
-  changes added in the 2026-09-09 round (the evidence above is dated
-  2026-09-08, i.e. before that round).
+  binding, character-session-resolve, and leave→rejoin persistence.
+- **Live re-smoke on CURRENT HEAD — DONE** (2026-09-09 03:00–03:04 UTC, rows
+  dated 09-09): session 9 (opened 09-08 19:46:53, `last_seen_at` frozen at
+  19:52:53, i.e. ~7h stalled with no heartbeat) was closed by the current
+  join path at exactly 09-09 03:00:03 — the "close any still-open window
+  first" reconnect semantics (`registerPlayerJoin`,
+  `UPDATE ... SET left_at = now() WHERE left_at IS NULL`). Sessions 10
+  (03:00:03→03:02:11) and 11 (03:02:47→03:04:06) chain cleanly: no `!link`
+  needed, `character_id` auto-bound to 3, `left_at` set on every closed row,
+  exactly one open window at all times (partial-unique backstop never
+  triggered a visible conflict). The stale-window close + concurrent-join
+  idempotency changes from the 09-09 round are now exercised live. (The
+  strict "heartbeat-after-leave must not revive presence" drop is still only
+  covered by the HTTP suite, not a live observation — optional deterministic
+  curl check documented in session notes.)
 - Discord OAuth: user-confirmed real sign-in completed on 2026-09-09 (browser →
   Discord authorize → callback → session issued). Recorded from user report;
   not independently observed in this environment.
 
 ## Unverified (needs infrastructure we don't have in a plain dev env)
-- Live Minecraft round-trip — **VERIFIED end-to-end** (sessions 5 & 6 evidence
-  captured in Verified). Covers join/presence/heartbeat/session-rotation/leave,
-  `!link` code consume, persistent-id binding, character-session-resolve, and
-  leave→rejoin persistence (rejoin without `!link` kept `character_id = 3`).
-  Only residual: re-smoke on current HEAD, since `player_session` gained the
-  stale-heartbeat guard + concurrent-join idempotency in the 2026-09-09 round.
+- Live Minecraft round-trip — **VERIFIED end-to-end**, including a re-smoke on
+  current HEAD (2026-09-09 rows, sessions 9/10/11 in Verified — the 09-09-round
+  stale-window close + concurrent-join idempotency now exercised live). Covers
+  join/presence/heartbeat/session-rotation/leave, `!link` code consume,
+  persistent-id binding, character-session-resolve, leave→rejoin persistence
+  (rejoin without `!link` kept `character_id = 3`), and no overlapping open
+  windows. Residual only: the strict "heartbeat-after-leave drops presence" drop
+  is HTTP-suite-covered but not yet observed live (deterministic curl check is
+  documented/simple to run on the server).
 - Real Discord OAuth — **VERIFIED**: user-confirmed live sign-in (2026-09-09) —
   browser → `oauth2/authorize` → callback → code exchange → session issued.
   Details recorded in the Verified block above.
@@ -167,11 +181,8 @@
 - Automate the `level.dat` NBT patch for Beta-APIs worlds (currently manual, see README).
 - Decide inventory size/UI approach before player-facing.
 - CI/deploy/backup tooling (rake the `npm test` + `npm run build` gates into CI).
-- Deploy the updated behavior pack to a live server and verify the
-  heartbeat/leave + signed-call round-trip against real client joins
-  (= close the UNVERIFIED live Minecraft round-trip above).
-- Complete a real Discord OAuth sign-in with a real app
-  (= close the UNVERIFIED Discord OAuth item above).
+- Complete a real Discord OAuth sign-in with a real app — the live sign-in
+  (2026-09-09) is user-confirmed but was not independently observed in this env.
 
 > Note: the `characters.xuid` rename is DONE (migration 015) — do not treat it
 > as pending. Historical CHANGELOG entries that mention it as pending are
@@ -221,13 +232,13 @@ unusable, purely for table hygiene. Mirrors the trade-expiry job's exact pattern
 Automated integration tests (20/20 on the real docker stack), the signed+BDS
 pack, `trust proxy` (verified behind a real docker nginx), the backend
 foundation batch (character confirm/lock, multi-currency economy, containers,
-idempotency, cases, security center, OAuth state) and the retention/rate-limit
-hardening round are all done. Remaining
-verified-gaps are the two genuinely external paths: (1) deploy the
-updated pack to a live server and confirm the heartbeat/leave + signed-call
-round-trip against real client joins; (2) complete a real Discord OAuth
-sign-in. After those: CI gate on `npm run build` + `npm test`, NBT patch
-automation, inventory UI.
+idempotency, cases, security center, OAuth state), the retention/rate-limit
+hardening round, and the live BDS re-smoke on current HEAD (2026-09-09 rows)
+are all done. Remaining verified-gap: live Discord OAuth was user-confirmed
+(2026-09-09) but not independently observed in this environment; the
+"heartbeat-after-leave drops presence" drop is HTTP-suite-covered and can be
+observed live with a documented curl check if desired. After those: CI gate on
+`npm run build` + `npm test`, NBT patch automation, inventory UI.
 
 ## Do Not Change
 - One Discord account = one character
