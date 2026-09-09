@@ -254,6 +254,18 @@ module is NOT bundled on this build, do not migrate to it).
   all the same 409/403/404 protections as the player routes (see
   `backend/src/modules/bridge/index.ts`).
 
+In-game staff commands run through the same signed bridge channel
+(`behavior_pack/scripts/admin_commands.js`). The pack forwards the *actor's*
+own persistentId and the backend re-checks RBAC server-side — the pack is
+never trusted to decide who may run something. A denied attempt returns `403`
+and is recorded as a HIGH `staff_command_forbidden` security event.
+
+- `!give <player> <amount> [cash|bank|red_money]` (permission `economy.grant`)
+  → `POST /bridge/admin/give` `{actorName, actorPersistentId, targetName,
+  targetPersistentId, amountCents, currency}` — grants money from the staff
+  player to an online player's wallet (mirrors `POST /admin/economy/grant`;
+  audited + ledgered). Unlinked actor/target → `404`.
+
 ## Roles & permissions
 
 `005_seed_permissions.sql` seeds four permission keys

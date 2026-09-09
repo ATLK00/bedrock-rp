@@ -50,6 +50,76 @@
 ...
 
 ---
+## [2026-09-09 17:55] — AI: big-pickle (opencode) — In-game staff command `!give` (bridge admin, RBAC on the actor) + CI infra fix (host-network docker)
+
+### Task
+User: "จัดมา" (go) after CI turned green. Gap: staff could only grant money
+from the web admin console — nothing in-game. Also (context): CI was failing
+because the GitHub Actions `services:` DNS alias for `postgres`/`redis`
+resolved erratically (`EAI_AGAIN`); that was fixed in this round too.
+
+### Changed
+- `backend/src/modules/bridge/index.ts` — new `POST /bridge/admin/give`
+  `{actorName, actorPersistentId, targetName, targetPersistentId,
+  amountCents, currency?}`. Resolves the actor's character from their
+  persistentId → linked Discord user → `hasPermission(economy.grant)`.
+  **Server-side RBAC on the actor — the pack is never trusted.** On deny: 403
+  + HIGH `staff_command_forbidden` security event (Security Center). Delegate
+  to `economy.grant` (audited + ledgered, all three currencies). Unlinked
+  actor/target → 404; bad amount/currency/identity → 400.
+- `behavior_pack/scripts/admin_commands.js` (new) — `tryHandleAdminCommand`
+  parses `!give <player> <amount> [cash|bank|red_money]`, forwards actor +
+  target persistentIds, shows the server's verdict in chat. Client-side UX
+  guards (amount cap, self-grant refusal, online-only targets) are just UX —
+  the real gate is backend RBAC.
+- `behavior_pack/scripts/main.js` — imports the new module; chatSend
+  intercepts `!give` (cancel + never to public chat) before the `!inv` hook.
+- `backend/src/test/integration.test.ts` — new "bridge admin give" subtest
+  (suite 24/24): owner gives cash + bank (wallet asserts), 400 validation,
+  403 for a no-role actor + `staff_command_forbidden` event asserted, 404
+  unlinked target.
+- `.github/workflows/ci.yml` — postgres/redis now start via `docker run
+  --network host` (with a pg_isready/redis-cli readiness loop) instead of the
+  `services:` block whose hostname DNS flaked (`EAI_AGAIN`). Integration suite
+  also gains a 5s `connectionTimeoutMillis` in its readiness probe.
+- `README.md` / `AI_HANDOFF.md` — documented the in-game staff commands
+  section + bridge RBAC model.
+
+### Why
+- In-game money grants should not depend on the web console, but must never
+  trust the game client about identity or permission. Resolving the actor by
+  persistentId and re-running RBAC in the backend keeps the property "who may
+  grant" decided by one source of truth (the Discord-linked user's roles).
+
+### Tests
+- [PASS] `npm run build` (tsc) clean.
+- [PASS] `npm test` — 24/24 (was 23).
+- [PASS] `node --check` on both `behavior_pack/scripts/admin_commands.js`
+  and `main.js`.
+- [PASS] CI on GitHub (after the `--network host` infra fix): build +
+  migrate + 24-test integration + leveldat patcher self-check green.
+
+### Security
+- Bridge admin verbs require the *actor's* Discord user to hold the matching
+  permission; a denied attempt becomes a HIGH, target/user-attributed
+  security event. Bridge signatures still gate the whole `/bridge` surface.
+- The `!give` grant limit on the pack side (100,000,000 units) is a UX guard,
+  not a security boundary — the backend has no such cap (web `/admin` has none
+  either; economy anomaly detection covers the loud cases).
+
+### Known Issues
+- In-game `!give` requires the staff and target players to be online with
+  known persistentIds (pack looks them up from its join map). Offline targets
+  get a "not online" message — use the admin web for offline grants.
+- Pack changes need copying to the WSL2 BDS pack dir + a server restart to
+  take effect.
+
+### Next Steps
+- User side: deploy the updated behavior pack to BDS (WSL2) and verify
+  `!give` live; browser pass of `/admin`; confirm vanilla inventory slot model
+  (36-slot question) — that still gates the RP inventory slot work.
+
+---
 ## [2026-09-09 17:05] — AI: big-pickle (opencode) — Admin console is server-side admin-only + OAuth `?next=` return
 
 ### Task

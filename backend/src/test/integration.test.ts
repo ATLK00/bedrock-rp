@@ -959,6 +959,103 @@ test("integration suite", async (t) => {
     assert.equal(badTarget.status, 400);
   });
 
+  // 13c. in-game staff command: !give (authorization on the actor's identity, not the pack)
+  await t.test("bridge admin give: RBAC on actor / success / forbidden security event", async () => {
+    const bridgePost = async (path: string, body: unknown) => {
+      const raw = JSON.stringify(body);
+      return fetch(`${baseUrl}${path}`, { method: "POST", headers: signedHeaders(BDS_SECRET, raw), body: raw });
+    };
+
+    // fresh linked characters: Fred (staff-wannabe, NO roles) and Gwen (target)
+    const f = await upsertUserByDiscordId("2002", "UserF");
+    const tokenF = await issueSessionToken(f.id);
+    assert.equal((await postAs("/character", { name: "Fred" }, tokenF)).status, 201);
+    let codeRes = await postAs("/character/link-code", {}, tokenF);
+    let { code } = await codeRes.json();
+    let raw = JSON.stringify({ code, xuid: "p-F" });
+    assert.equal((await fetch(`${baseUrl}/bridge/character/link`, {
+      method: "POST", headers: signedHeaders(BDS_SECRET, raw), body: raw,
+    })).status, 200);
+
+    const g = await upsertUserByDiscordId("2003", "UserG");
+    const tokenG = await issueSessionToken(g.id);
+    assert.equal((await postAs("/character", { name: "Gwen" }, tokenG)).status, 201);
+    codeRes = await postAs("/character/link-code", {}, tokenG);
+    ({ code } = await codeRes.json());
+    raw = JSON.stringify({ code, xuid: "p-G" });
+    assert.equal((await fetch(`${baseUrl}/bridge/character/link`, {
+      method: "POST", headers: signedHeaders(BDS_SECRET, raw), body: raw,
+    })).status, 200);
+
+    const charG = Number((await pool.query(
+      `SELECT id FROM characters WHERE persistent_id = 'p-G'`
+    )).rows[0].id);
+    const wallet = async () => Number((await pool.query(
+      `SELECT balance_cents FROM wallets WHERE character_id = $1`, [charG]
+    )).rows[0]?.balance_cents ?? 0);
+
+    // owner (userA, linked p-A) grants to Gwen -> cash wallet grows
+    assert.equal(await wallet(), 0);
+    const give = await bridgePost("/bridge/admin/give", {
+      actorName: "Alice", actorPersistentId: "p-A",
+      targetName: "Gwen", targetPersistentId: "p-G",
+      amountCents: 125000, currency: "cash",
+    });
+    assert.equal(give.status, 200);
+    assert.equal((await give.json()).ok, true);
+    assert.equal(await wallet(), 125000);
+
+    // bank variant lands in wallet_balances
+    const giveBank = await bridgePost("/bridge/admin/give", {
+      actorName: "Alice", actorPersistentId: "p-A",
+      targetName: "Gwen", targetPersistentId: "p-G",
+      amountCents: 300, currency: "bank",
+    });
+    assert.equal(giveBank.status, 200);
+    const bank = Number((await pool.query(
+      `SELECT balance_cents FROM wallet_balances WHERE character_id = $1 AND currency = 'bank'`, [charG]
+    )).rows[0].balance_cents);
+    assert.equal(bank, 300);
+
+    // validation: bad amount / bad currency / missing identity
+    assert.equal((await bridgePost("/bridge/admin/give", {
+      actorName: "Alice", actorPersistentId: "p-A", targetName: "Gwen", targetPersistentId: "p-G", amountCents: 0,
+    })).status, 400);
+    assert.equal((await bridgePost("/bridge/admin/give", {
+      actorName: "Alice", actorPersistentId: "p-A", targetName: "Gwen", targetPersistentId: "p-G", amountCents: 10, currency: "gold",
+    })).status, 400);
+    assert.equal((await bridgePost("/bridge/admin/give", {
+      actorName: "Alice", actorPersistentId: "p-A", targetName: "Gwen", targetPersistentId: "p-G",
+    })).status, 400);
+
+    // non-staff actor is REFUSED (RBAC on the actor's Discord user) and it becomes a HIGH security event
+    const denied = await bridgePost("/bridge/admin/give", {
+      actorName: "Fred", actorPersistentId: "p-F",
+      targetName: "Gwen", targetPersistentId: "p-G",
+      amountCents: 100, currency: "cash",
+    });
+    assert.equal(denied.status, 403);
+    assert.equal((await denied.json()).ok, false);
+    assert.equal(await wallet(), 125000); // nothing granted
+
+    const sec = await (await getAs("/admin/security/events?severity=HIGH", ctx.tokenA)).json();
+    assert.ok(
+      sec.events.some((e: any) =>
+        e.event_type === "staff_command_forbidden" && Number(e.actor_user_id) === Number(f.id) &&
+        e.payload?.command === "give"
+      ),
+      "attempted staff command by non-staff must raise a HIGH security event"
+    );
+
+    // unlinked target -> 404
+    const missingTarget = await bridgePost("/bridge/admin/give", {
+      actorName: "Alice", actorPersistentId: "p-A",
+      targetName: "Ghost", targetPersistentId: "p-ghost",
+      amountCents: 100,
+    });
+    assert.equal(missingTarget.status, 404);
+  });
+
   // 14. cases: create / staff resolve / messages / permission
   await t.test("cases: lifecycle + staff resolution", async () => {
     // validation

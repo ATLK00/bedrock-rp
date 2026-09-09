@@ -7,6 +7,34 @@
   real infrastructure; a small set of infrastructure-dependent paths remains
   explicitly unverified (listed below under **Unverified**).
 
+## 2026-09-09 Round 6 — in-game staff command `!give` (authorized on the actor's identity via RBAC)
+
+- User's "จัดมา" led here after the admin web + CI were green. The gap:
+  staff had no way to grant money in-game — only the web admin console.
+- New bridge endpoint `POST /bridge/admin/give`
+  (`backend/src/modules/bridge/index.ts`): body
+  `{ actorName, actorPersistentId, targetName, targetPersistentId,
+  amountCents, currency? }`. The actor's own character is resolved from
+  their persistentId → Discord user → `hasPermission(economy.grant)`.
+  **The pack is never trusted for authorization** — a player without the
+  permission is refused server-side (403) and the attempt is recorded as a
+  HIGH `staff_command_forbidden` security event (Security Center / admin
+  web tab). Target is resolved by persistentId too; unlinked target or
+  actor → 404. Delegates to `economy.grant` (audited + ledgered, all
+  currencies cash/bank/red_money).
+- Behavior pack: new `behavior_pack/scripts/admin_commands.js`
+  (`tryHandleAdminCommand`, chat triggers `!give <player> <amount>
+  [cash|bank|red_money]`), wired into main.js's `chatSend` interceptor
+  (cancel + never hits public chat) right before the `!inv` hook. Guarded
+  client-side: amount cap, self-grant refusal, online-only targets — but
+  these are UX niceties, the real gate is the backend RBAC.
+- Suite grew to 24/24 (new "bridge admin give" subtest: owner success on
+  cash+bank, wallet assertions, 400 on bad amount/currency/missing
+  identity, 403 + security-event assert for a no-role actor, 404 for an
+  unlinked target). `node --check` verified on both pack JS files.
+  Live deploy still pending on your WSL2 BDS side (copy behavior_pack
+  changes to `~/bds/behavior_packs/bedrock-rp-core/` + restart).
+
 ## 2026-09-09 Round 5 — admin console is now server-side admin-only + `?next=` login return
 
 - User: "แอดมินนัมนควรเข้าได้แค่แอดมินดิ" (the admin console should only

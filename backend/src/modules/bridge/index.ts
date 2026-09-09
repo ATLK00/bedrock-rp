@@ -2,6 +2,9 @@ import { Router } from "express";
 import { consumeLinkCode, InvalidLinkCodeError, PersistentIdAlreadyLinkedError, findCharacterByPersistentId } from "../character/index.js";
 import { registerPlayerJoin, heartbeat, playerLeft } from "../player_session/index.js";
 import * as inventory from "../inventory/index.js";
+import * as economy from "../economy/index.js";
+import { hasPermission } from "../../rbac/index.js";
+import { emitSecurityEvent } from "../security/index.js";
 
 /**
  * Routes called BY the BDS behavior pack (see behavior_pack/scripts/main.js).
@@ -268,4 +271,97 @@ bridgeRouter.post("/inventory/move", async (req, res) => {
 
   logBridge("inv.move", req, startedAt, 200);
   res.json({ ok: true, message: "Done." });
+});
+
+// ---------------------------------------------------------------------------
+// In-game staff commands (called by the behavior pack's `!give` — mirrors the
+// /admin route for economy, but re-authorizes on the staff player's identity
+// because bridge calls have no web session: the actor is identified by their
+// own persistentId captured at join, and RBAC is re-checked server-side. The
+// pack is never trusted — a player without economy.grant is refused here
+// regardless of what the client sends, and the attempt is raised as a
+// HIGH security event for the Security Center.
+// ---------------------------------------------------------------------------
+
+const VALID_GRANT_CURRENCIES = new Set<economy.Currency>(["cash", "bank", "red_money"]);
+
+/**
+ * Called when a staff player types `!give <player> <amount> [currency]` in
+ * chat. `actor` is the staff member, `target` the player being granted money.
+ * Both are resolved by persistentId (the only identity the pack has), never
+ * by client-supplied character ids.
+ */
+bridgeRouter.post("/admin/give", async (req, res) => {
+  const startedAt = Date.now();
+  const { actorName, actorPersistentId, targetName, targetPersistentId, amountCents, currency } = (req.body ?? {}) as {
+    actorName?: unknown;
+    actorPersistentId?: unknown;
+    targetName?: unknown;
+    targetPersistentId?: unknown;
+    amountCents?: unknown;
+    currency?: unknown;
+  };
+
+  const aName = isNonEmptyString(actorName) && actorName.length <= PLAYER_NAME_MAX ? actorName : null;
+  const aId = isNonEmptyString(actorPersistentId) && actorPersistentId.length <= MAX_IDENTIFIER_LENGTH ? actorPersistentId : null;
+  const tName = isNonEmptyString(targetName) && targetName.length <= PLAYER_NAME_MAX ? targetName : null;
+  const tId = isNonEmptyString(targetPersistentId) && targetPersistentId.length <= MAX_IDENTIFIER_LENGTH ? targetPersistentId : null;
+  const aCents = typeof amountCents === "number" && Number.isSafeInteger(amountCents) && amountCents > 0 ? amountCents : null;
+  const cur = currency === undefined || currency === null ? "cash" : String(currency);
+
+  if (!aName || !aId || !tName || !tId || aCents === null) {
+    logBridge("admin.give", req, startedAt, 400);
+    return res.status(400).json({ ok: false, message: "actor/target identity and a positive integer amount are required." });
+  }
+  if (!VALID_GRANT_CURRENCIES.has(cur as economy.Currency)) {
+    logBridge("admin.give", req, startedAt, 400);
+    return res.status(400).json({ ok: false, message: "currency must be cash, bank or red_money." });
+  }
+
+  // The actor's own character — if this staff player is not linked to a
+  // character, they can't be authorized to act as staff in-game.
+  const actorCharacter = await findCharacterByPersistentId(aId);
+  if (!actorCharacter) {
+    logBridge("admin.give", req, startedAt, 404);
+    return res.status(404).json({ ok: false, message: "Your Minecraft account isn't linked to a character — log in to the site and link it before using staff commands." });
+  }
+
+  // Server-side RBAC on the actor's Discord user. The pack only proves "this
+  // is the game server"; the staff identity + permission is settled here.
+  const allowed = await hasPermission(actorCharacter.userId, "economy.grant");
+  if (!allowed) {
+    await emitSecurityEvent({
+      eventType: "staff_command_forbidden",
+      severity: "HIGH",
+      actorUserId: actorCharacter.userId,
+      targetType: "character",
+      targetId: String(actorCharacter.id),
+      payload: { command: "give", actorName: aName, targetName: tName, amountCents: aCents, currency: cur },
+    });
+    logBridge("admin.give", req, startedAt, 403);
+    return res.status(403).json({ ok: false, message: "You don't have permission to grant money in-game." });
+  }
+
+  const targetCharacter = await findCharacterByPersistentId(tId);
+  if (!targetCharacter) {
+    logBridge("admin.give", req, startedAt, 404);
+    return res.status(404).json({ ok: false, message: `${tName} isn't linked to a character on the server yet.` });
+  }
+
+  try {
+    await economy.grant({
+      characterId: targetCharacter.id,
+      amountCents: aCents,
+      reason: `in-game grant by ${aName}`,
+      actorUserId: actorCharacter.userId,
+      currency: cur as economy.Currency,
+      requestId: (req as unknown as { requestId?: string }).requestId ?? null,
+    });
+    logBridge("admin.give", req, startedAt, 200);
+    return res.json({ ok: true, message: `Given ${aCents / 100} ${cur} to ${tName}.` });
+  } catch (err: any) {
+    console.error("[bridge] admin give failed", err);
+    logBridge("admin.give", req, startedAt, 500);
+    return res.status(500).json({ ok: false, message: "Something went wrong granting money. Try again." });
+  }
 });
