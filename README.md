@@ -157,6 +157,23 @@ A few sample items (`rp:bandage`, `rp:id_card`, `rp:cash_stack`) are
 seeded by `004_seed_items.sql` for testing; real item catalog design is
 future work.
 
+In-game UI (behavior pack, `@minecraft/server-ui`): players open the RP
+inventory — a separate system from the vanilla backpack — by typing `!inv`
+in chat (`!inventory` / `!bag` also work). It lists the character's carried
+slots + owned containers with weights, and moves items between them. All
+reads/writes go through the signed bridge endpoints below; identity is the
+player's persistentId (no client-supplied character id), and containers
+belonging to someone else return `403`.
+
+- `POST /bridge/inventory/view` `{playerId}` — character slots + carry
+  weight/limit + owned containers (with contents + used weight). `404`
+  if that persistentId isn't linked to a character.
+- `POST /bridge/inventory/move` `{playerId, itemId, quantity, from, to}` —
+  `from`/`to` are `"character"` or a container id; moves character↔container
+  or container↔container (same owner). Atomic, weight/capacity-enforced,
+  all the same 409/403/404 protections as the player routes (see
+  `backend/src/modules/bridge/index.ts`).
+
 ## Roles & permissions
 
 `005_seed_permissions.sql` seeds four permission keys

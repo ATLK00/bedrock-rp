@@ -50,6 +50,112 @@
 ...
 
 ---
+## [2026-09-09 12:50] — AI: big-pickle (opencode) — In-game RP inventory UI (!inv via server-ui) + signed bridge inventory endpoints
+
+### Task
+The inventory UI decision the handoff flagged as a prerequisite for being
+player-facing: build the in-game UI as a SEPARATE system from the vanilla
+backpack, using `@minecraft/server-ui`, with a player-web viewer deferred to
+later on top of the already-existing session routes. In-game has no session —
+the pack's only identity is the persistentId captured at join — so the
+backend shape had to be extended with signed per-player inventory endpoints
+that resolve identity server-side.
+
+### Changed
+- `backend/src/modules/character/index.ts` — new `findCharacterByPersistentId()`:
+  live character for a persistentId (`id`, `userId`, `name`, `carryWeightG`).
+  Used by every in-game bridge inventory route; returns null when unlinked.
+- `backend/src/modules/bridge/index.ts` — two new signed endpoints, both keyed
+  on `playerId` (persistentId), never a client-supplied character id:
+  - `POST /bridge/inventory/view` `{playerId}` — the character's slots +
+    current weight/limit + owned containers (with contents + used weight).
+    `404` when the persistentId isn't linked.
+  - `POST /bridge/inventory/move` `{playerId, itemId, quantity, from, to}` —
+    character↔container / container↔container, atomic via the existing
+    transfer functions (same row-locking + weight/capacity checks as the
+    player routes). Ownership enforced: a container owned by another
+    character → `403`. Errors map to the same 404/409 vocabulary the player
+    routes use, with `{ok, message}` shaped for the pack's chat feedback.
+    Accepts container ids as number or numeric string (pg int8 ids arrive as
+    strings over JSON — locked in by the test).
+- `behavior_pack/manifest.json` — added `@minecraft/server-ui` 1.0.0-beta.
+- `behavior_pack/scripts/inventory_ui.js` (new) — `!inv`/`!inventory`/`!bag`
+  chat trigger opens a `ActionFormData` root (carried slots + containers with
+  weights), slot → `ModalFormData` (quantity + target container) to move into
+  a container, container → item → `ModalFormData` (quantity) to take to carry.
+  Every action re-fetches from the server before re-rendering (no optimistic
+  state). `form.show()` funnels through the main thread (network callbacks run
+  in raw context).
+- `behavior_pack/scripts/main.js` — chatSend handles `!inv` before `!link`,
+  cancels the message from public chat, passes `postToBackend` +
+  `getPersistentId` + `isConfigured` to the UI module.
+- `README.md` — Inventory section documents the `!inv` UI + both bridge
+  endpoints and the authorization model.
+- `AI_HANDOFF.md` — inventory UI decision recorded as RESOLVED; next-step
+  pointers moved to player-web layer + vanilla-size confirmation.
+
+### Why
+The handoff's pending item said to decide "inventory size/UI approach before
+player-facing." The user chose: in-game UI separate from the vanilla backpack
+via server-ui, web viewer later. The web viewer already has its backing API
+(`/character/inventory`, `/inventories/*`), so this round built the missing
+in-game surface — which required the new signed bridge endpoints because the
+pack cannot present a session cookie.
+
+### Tests
+- [PASS] `npm run build` (tsc) clean.
+- [PASS] `npm test` — suite grew 20 → 21 tests, all 21 passing on the docker
+  stack. New test covers: view (slots/weight/own containers only), unlinked
+  `404`, character→container move, container→character move (string id form),
+  move into someone else's container `403`, container→container on empty
+  source fails cleanly `409`, over-quantity `409`, same-target `400`,
+  missing container `404`, invalid target shape `400`.
+- [PASS] `node --check` on inventory_ui.js + main.js (ESM syntax).
+- Found + fixed a real bug during testing: `writeAudit` hit
+  `invalid input syntax for type bigint: "NaN"` because `findCharacterByPersistentId`
+  selected `user_id` without aliasing while the code read `row.userId` →
+  `Number(undefined)` = `NaN` → audit `actor_user_id` cast exploded. Aliased
+  `user_id AS "userId"`.
+
+### Security
+- Identity always resolved server-side from `persistent_id`; move/view take
+  no character id from the pack.
+- Container ownership enforced per target before any lock/transfer; results
+  that leave the character's own data are impossible to request.
+- Bridge endpoints inherit the existing signed-request auth (`x-bds-*` headers
+  + HMAC + freshness/replay checks), so `!inv` traffic is indistinguishable
+  in trust from join/heartbeat traffic.
+- All moves reuse the pre-existing atomic transfer paths; there is no new
+  hand-rolled SQL for money/item movement.
+- Same `{ok, message}` error vocabulary means the pack can't be tricked by a
+  successful HTTP status into showing "done" — servers never leak the item
+  list to a not-linked player; the pack tells them to `!link` first.
+
+### Known Issues
+- The `!inv` form flow is untested in a real client (BDS Beta-APIs join bug,
+  deprioritized); the backend surface it talks to is fully integration-covered.
+  Message/form strings are only `node --check`-validated, not in-game rendered.
+- `@minecraft/server-ui` `1.0.0-beta` chosen to match the pack's existing
+  beta deps; if the world pins a different API version, the form APIs used
+  (`ActionFormData`, `ModalFormData`) are stable across recent releases.
+- `DEFAULT_INVENTORY_SIZE = 36` still an assumption about the vanilla
+  backpack; final slot model to confirm against the real world later.
+
+### Next Steps
+- Player-web layer: inventory viewer + wallet screens on existing session
+  routes (decision deferred by the user to later).
+- Confirm vanilla 36-slot size assumption when a real world is reachable.
+- Push repo to a remote so `.github/workflows/ci.yml` runs.
+
+### Handoff Notes
+- In-game commands: `!inv` / `!inventory` / `!bag`. The RP inventory has
+  nothing to do with the vanilla hotbar/backpack — the DB is the source of
+  truth and the form is the only in-game window onto it.
+- The pack's `!inv` fetches through the same signed bridge channel as
+  join/heartbeat/link; a `variables.json` change still needs a restart to
+  refresh `cachedBridgeConfig`.
+
+---
 
 ## [2026-09-09 10:52] — AI: big-pickle (opencode) — Deploy/backup tooling (prod compose, Dockerfile, backup/restore verified)
 

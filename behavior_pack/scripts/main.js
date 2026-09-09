@@ -3,6 +3,7 @@ import { beforeEvents as adminBeforeEvents } from "@minecraft/server-admin";
 import { http, HttpRequest, HttpRequestMethod, HttpHeader } from "@minecraft/server-net";
 import { getBridgeConfig } from "./bridgeConfig.js";
 import { hmacSha256Hex } from "./crypto_hmac.js";
+import { tryOpenInventoryUi } from "./inventory_ui.js";
 
 /**
  * IDENTITY NOTE: `world.afterEvents.playerJoin`'s `event.playerId` is
@@ -166,7 +167,19 @@ system.runInterval(() => {
  */
 world.beforeEvents.chatSend.subscribe((event) => {
   const message = event.message.trim();
-  if (!message.toLowerCase().startsWith("!link ")) return;
+  const lower = message.toLowerCase();
+
+  // In-game RP inventory UI (separate from the vanilla backpack).
+  if (tryOpenInventoryUi(message, event.sender, {
+    postToBackend,
+    getPersistentId: () => persistentIdByName.get(event.sender.name),
+    isConfigured: () => !!cachedBridgeConfig,
+  })) {
+    event.cancel = true; // never hit public chat
+    return;
+  }
+
+  if (!lower.startsWith("!link ")) return;
 
   event.cancel = true; // never let this hit public chat, whether it succeeds or fails
   const code = message.slice(6).trim();

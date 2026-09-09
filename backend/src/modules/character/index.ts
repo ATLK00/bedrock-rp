@@ -161,6 +161,26 @@ export class PersistentIdAlreadyLinkedError extends Error {
 export const XuidAlreadyLinkedError = PersistentIdAlreadyLinkedError;
 
 /**
+ * Look up the live character that a Bedrock persistent id is linked to.
+ * Used by bridge routes that act on a player's own data (in-game
+ * inventory UI) where there is no session — the identity arrives as the
+ * persistentId captured at join time. Returns null if unlinked.
+ */
+export async function findCharacterByPersistentId(persistentId: string): Promise<
+  { id: number; userId: number; name: string; carryWeightG: number } | null
+> {
+  const { rows } = await pool.query(
+    `SELECT id, user_id AS "userId", name, carry_weight_g AS "carryWeightG"
+     FROM characters
+     WHERE persistent_id = $1 AND is_deleted = false`,
+    [persistentId]
+  );
+  if (rows.length === 0) return null;
+  const row = rows[0];
+  return { id: Number(row.id), userId: Number(row.userId), name: row.name, carryWeightG: Number(row.carryWeightG) };
+}
+
+/**
  * Called from the BDS bridge (POST /bridge/character/link) when a player
  * types `!link <code>` in chat. Consumes the code — it cannot be reused
  * once claimed, whether the attempt succeeds or fails on the persistent-id check.

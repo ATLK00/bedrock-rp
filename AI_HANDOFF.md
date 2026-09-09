@@ -178,14 +178,20 @@
   deployment and the documented caveat applies.
 
 ## Pending (features/tooling not built yet — not blocked items)
-- Decide inventory size/UI approach before player-facing.
+- Inventory UI decision: RESOLVED 2026-09-09 — in-game via `@minecraft/server-ui`
+  (RP inventory is a separate system from the vanilla backpack, `!inv` chat
+  command), with a player-web inventory viewer to follow later on top of the
+  existing `/character/inventory` + `/inventories/*` routes. Built: signed
+  `/bridge/inventory/view` + `/bridge/inventory/move` + `!inv` form flow.
+  Unresolved sub-item: vanilla `DEFAULT_INVENTORY_SIZE = 36` vs final RP
+  slot model still to confirm against how the world presents inventory.
 - Complete a real Discord OAuth sign-in with a real app — the live sign-in
   (2026-09-09) is user-confirmed but was not independently observed in this env.
 
 > CI gate (build + `npm test` + level.dat self-check), the `level.dat` NBT
-> patch automation (`tools/leveldat_patch.py`), and deploy/backup tooling
-> (`ops/docker-compose.prod.yml`, `ops/backup.sh`, `ops/README.md`) are now
-> DONE.
+> patch automation (`tools/leveldat_patch.py`), deploy/backup tooling
+> (`ops/docker-compose.prod.yml`, `ops/backup.sh`, `ops/README.md`), and the
+> in-game inventory UI (`!inv` + bridge inventory endpoints) are now DONE.
 
 > Note: the `characters.xuid` rename is DONE (migration 015) — do not treat it
 > as pending. Historical CHANGELOG entries that mention it as pending are
@@ -233,21 +239,31 @@ unusable, purely for table hygiene. Mirrors the trade-expiry job's exact pattern
   automated (`tools/leveldat_patch.py` with `--self-test`) and deploy/backup
   tooling exists (`ops/docker-compose.prod.yml` + `ops/backup.sh`, verified
   end-to-end on the local host: build → migrate → healthy → backup →
-  pg_restore round-trip → down -v).
+  pg_restore round-trip → down -v). The in-game inventory UI ships in the
+  behavior pack (`!inv` via `@minecraft/server-ui`) over two new signed
+  bridge endpoints (`/bridge/inventory/view`, `/bridge/inventory/move`) —
+  identity is the persistentId, containers are ownership-checked (403 on
+  someone else's), all covered by the integration suite (now 21 tests).
 
 ## Next Recommended Task
-Automated integration tests (20/20 on the real docker stack), the signed+BDS
+Automated integration tests (21/21 on the real docker stack), the signed+BDS
 pack, `trust proxy` (verified behind a real docker nginx), the backend
 foundation batch (character confirm/lock, multi-currency economy, containers,
 idempotency, cases, security center, OAuth state), the retention/rate-limit
 hardening round, the live BDS re-smoke on current HEAD (2026-09-09 rows), the
 CI gate (`.github/workflows/ci.yml`), the `level.dat` NBT patch automation
-(`tools/leveldat_patch.py`), and deploy/backup tooling
-(`ops/docker-compose.prod.yml` + `ops/backup.sh`) are all done.
+(`tools/leveldat_patch.py`), deploy/backup tooling
+(`ops/docker-compose.prod.yml` + `ops/backup.sh`), and the in-game inventory
+UI (`!inv` via `@minecraft/server-ui` + signed `/bridge/inventory/view` +
+`/bridge/inventory/move`) are all done.
 Remaining verified-gap: live Discord OAuth was user-confirmed (2026-09-09)
 but not independently observed in this environment; the "heartbeat-after-leave
 drops presence" drop is HTTP-suite covered and can be observed live with a
-documented curl check if desired. After those: inventory UI design.
+documented curl check if desired; the `!inv` in-game form flow is built but
+NOT yet exercised in a real client (BDS join bug deprioritized — backend side
+fully covered by the integration suite). After those: player-web layer
+(inventory viewer + wallets) on top of the existing session routes, then the
+vanilla-36-slot-size confirmation against the real world.
 
 ## Do Not Change
 - One Discord account = one character

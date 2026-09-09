@@ -801,6 +801,116 @@ test("integration suite", async (t) => {
     assert.equal(otherContainer.status, 404);
   });
 
+  // 13b. bridge in-game inventory UI (identity = persistentId, like the pack)
+  await t.test("bridge inventory: view + move + ownership from persistentId", async () => {
+    // fresh user E with a linked character so assertions are deterministic
+    const e = await upsertUserByDiscordId("2001", "UserE");
+    const tokenE = await issueSessionToken(e.id);
+    const createdE = await postAs("/character", { name: "Eve" }, tokenE);
+    assert.equal(createdE.status, 201);
+    const charE = { id: Number((await createdE.json()).id) };
+
+    const codeRes = await postAs("/character/link-code", {}, tokenE);
+    const { code } = await codeRes.json();
+    const linkBody = JSON.stringify({ code, xuid: "p-E" });
+    const link = await fetch(`${baseUrl}/bridge/character/link`, {
+      method: "POST",
+      headers: signedHeaders(BDS_SECRET, linkBody),
+      body: linkBody,
+    });
+    assert.equal(link.status, 200);
+
+    const bridgePost = async (path: string, body: unknown) => {
+      const raw = JSON.stringify(body);
+      return fetch(`${baseUrl}${path}`, { method: "POST", headers: signedHeaders(BDS_SECRET, raw), body: raw });
+    };
+    const bridgeJson = async (path: string, body: unknown) =>
+      ((await bridgePost(path, body)).json()) as Promise<any>;
+
+    // give E items + one owned locker + one A-owned locker (for ownership test)
+    await postAs("/admin/inventory/give", { characterId: charE.id, itemId: "rp:bandage", quantity: 10 }, ctx.tokenA);
+    const lockerE = Number((await (await postAs(
+      "/admin/inventory/containers",
+      { storageType: "locker", ownerCharacterId: charE.id, label: "E's Locker", capacityWeightG: 5000 },
+      ctx.tokenA
+    )).json()).id);
+    const lockerA = Number((await (await postAs(
+      "/admin/inventory/containers",
+      { storageType: "locker", ownerCharacterId: ctx.charA.id, label: "A's Locker", capacityWeightG: 5000 },
+      ctx.tokenA
+    )).json()).id);
+
+    // unlinked persistentId → 404
+    const unlinked = await bridgePost("/bridge/inventory/view", { playerId: "p-nobody" });
+    assert.equal(unlinked.status, 404);
+
+    // view returns slots + weight + own containers
+    const view1 = await (await bridgePost("/bridge/inventory/view", { playerId: "p-E" })).json();
+    assert.equal(view1.ok, true);
+    assert.equal(view1.character.name, "Eve");
+    assert.equal(view1.carryWeightG, 500); // 10 * 50g
+    assert.equal(view1.carryWeightLimitG, 20000);
+    assert.equal(view1.slots.reduce((s: number, i: any) => s + i.quantity, 0), 10);
+    const ownLockerInView = view1.containers.find((c: any) => Number(c.id) === lockerE);
+    assert.ok(ownLockerInView, "own container listed");
+    assert.equal(ownLockerInView.items.reduce((s: number, i: any) => s + i.quantity, 0), 0);
+    assert.ok(!view1.containers.some((c: any) => Number(c.id) === lockerA), "someone else's container not listed");
+
+    // in-game move: character → own container
+    const moveIn = await bridgeJson("/bridge/inventory/move", {
+      playerId: "p-E", itemId: "rp:bandage", quantity: 4, from: "character", to: lockerE,
+    });
+    assert.equal(moveIn.ok, true);
+
+    const view2 = await (await bridgePost("/bridge/inventory/view", { playerId: "p-E" })).json();
+    assert.equal(view2.slots.reduce((s: number, i: any) => s + i.quantity, 0), 6);
+    const lockerAfter = view2.containers.find((c: any) => Number(c.id) === lockerE);
+    assert.equal(lockerAfter.items.reduce((s: number, i: any) => s + i.quantity, 0), 4);
+    assert.equal(lockerAfter.usedWeightG, 200);
+
+    // in-game move: container → character (pack sends ids as JSON numbers, but
+    // the string form must work too — pg int8 ids are strings on the wire)
+    const moveOut = await bridgeJson("/bridge/inventory/move", {
+      playerId: "p-E", itemId: "rp:bandage", quantity: 4, from: String(lockerE), to: "character",
+    });
+    assert.equal(moveOut.ok, true);
+
+    // move into someone else's container → 403 (ownership enforced by persistentId)
+    const steal = await bridgePost("/bridge/inventory/move", {
+      playerId: "p-E", itemId: "rp:bandage", quantity: 1, from: "character", to: lockerA,
+    });
+    assert.equal(steal.status, 403);
+
+    // container → container (own) works
+    const lockerE2 = Number((await (await postAs(
+      "/admin/inventory/containers",
+      { storageType: "house", ownerCharacterId: charE.id, label: "E's House", capacityWeightG: 5000 },
+      ctx.tokenA
+    )).json()).id);
+    const c2c = await bridgeJson("/bridge/inventory/move", {
+      playerId: "p-E", itemId: "rp:bandage", quantity: 3, from: lockerE, to: lockerE2,
+    });
+
+    // safety invariants
+    assert.equal(c2c.ok, false); // empty source container → 409 insufficient
+    const overQty = await bridgePost("/bridge/inventory/move", {
+      playerId: "p-E", itemId: "rp:bandage", quantity: 999, from: "character", to: lockerE,
+    });
+    assert.equal(overQty.status, 409);
+    const sameTarget = await bridgePost("/bridge/inventory/move", {
+      playerId: "p-E", itemId: "rp:bandage", quantity: 1, from: lockerE, to: lockerE,
+    });
+    assert.equal(sameTarget.status, 400);
+    const missingContainer = await bridgePost("/bridge/inventory/move", {
+      playerId: "p-E", itemId: "rp:bandage", quantity: 1, from: "character", to: 99999,
+    });
+    assert.equal(missingContainer.status, 404);
+    const badTarget = await bridgePost("/bridge/inventory/move", {
+      playerId: "p-E", itemId: "rp:bandage", quantity: 1, from: "character", to: "pocket",
+    });
+    assert.equal(badTarget.status, 400);
+  });
+
   // 14. cases: create / staff resolve / messages / permission
   await t.test("cases: lifecycle + staff resolution", async () => {
     // validation
