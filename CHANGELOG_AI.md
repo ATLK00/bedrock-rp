@@ -50,6 +50,86 @@
 ...
 
 ---
+## [2026-09-09 15:43] — AI: big-pickle (opencode) — Player web panel (Discord login → character → link-code → wallet/inventory)
+
+### Task
+Build the player-facing web layer the user greenlit with "ลุยเลย" — the
+browser half of the character/linking story currently only reachable via raw
+API calls. Scope per AI_HANDOFF: inventory viewer + wallets + link-code
+generation on the existing session routes, no new data surface.
+
+### Changed
+- `backend/src/web/playerWeb.ts` — NEW. Self-contained SPA served straight
+  from Express (`GET /player` HTML, `GET /player/app.css`, `GET
+  /player/app.js`): logged out → Discord login button; logged in no character
+  → one-field create form; logged in → character card (linked/whitelist
+  tags), **generate link code** button (`POST /character/link-code`, renders
+  the code + expiry + "พิมพ์ !link <code>"), wallet with history, carried
+  items with weights, owned containers with contents/capacity, logout. Plain
+  session cookies + same-origin `fetch` only. Lives in source as strings so
+  the Docker (dist+migrations only) layout stays untouched. Overrides the
+  global CSP on its three routes to `default-src 'self'; script-src 'self';
+  ...` (external JS/CSS, no inline scripts/styles, `frame-ancestors 'none'`).
+- `backend/src/app.ts` — mount `/player`, add `GET /` → redirect `/player`.
+- `backend/src/modules/auth/routes.ts` — Discord OAuth callback now redirects
+  browsers (`Accept: text/html`) to `/player` instead of a bare JSON body;
+  API clients keep `{ok, discordTag}` via the same Accept sniff.
+- `backend/src/test/integration.test.ts` — test #20 covering the panel: root
+  302 → /player, HTML/css/js serve 200 with the relaxed-but-safe CSP
+  assertions.
+- `README.md` — new "Player web" section + auth-flow step 3 browser redirect.
+- `AI_HANDOFF.md` — Pending (player-web viewer DONE), done-list, Known Issues,
+  Next Recommended Task updated.
+
+### Why
+Every in-game feature (link, inventory, spawn form) points at web-side
+identity as its source of truth, but a player had no way to log in, create
+their character, or generate the link code except curl/Postman. This closes
+that last connection endpoint-to-endpoint: Discord login → character →
+link-code → `!link`/spawn form in game.
+
+### Dependencies / Impact
+- Additive only: new router + 3 routes, 1 redirect, 1 Accept-sniff branch in
+  the OAuth callback. No DB change, no migration, no behavior-pack change.
+
+### Tests
+- [PASS] `npm run build` (tsc) clean.
+- [PASS] `npm test` — 22/22: existing 21 + new "player web: pages serve
+  under relaxed CSP + root redirect".
+- [FAIL] First run: `res.type("javascript")` produced a non-JS content type
+  (mime lookup "javascript" unknown) — fixed to `res.type("js")`, re-ran green.
+
+### Security
+- No new data surface — the panel reads the same session-authenticated routes
+  (`/character*`, `/inventories`, wallet).
+- CSP override is scoped to `/player/app.*` + `/player/` only; it stays
+  externally-sourced (no inline script/style), same-origin-only
+  (`connect-src 'self'`), and still refuses to be framed
+  (`frame-ancestors 'none'`).
+- Link-code generation keeps the existing per-route rate limit
+  (`/character/link-code` shares the 60/min admin tier).
+
+### Known Issues
+- Player web has no real-browser pass yet (integration suite only) — open
+  `http://<host>:8080/` once on the live server to confirm the OAuth dance
+  renders end-to-end.
+- No admin web yet (MASTER_PROMPT §22 is still unbuilt; out of player scope).
+
+### Next Steps
+- Confirm vanilla 36-slot size against the real world (last open inventory
+  sub-item).
+- Push repo remote so `.github/workflows/ci.yml` actually runs.
+- Consider Admin Web later (§22 in MASTER_PROMPT).
+
+### Handoff Notes
+- Serve-only-life: the panel ships inside the same backend process, so the
+  live host-node instance on port 8080 already serves `/player` after a
+  restart/deploy — nothing extra to copy to `~/bds`.
+- The `/character/link-code` button is intentionally the SAME endpoint the
+  behavior pack consumes via the spawn form — one code path for web + game.
+
+---
+
 ## [2026-09-09 15:30] — AI: big-pickle (opencode) — In-game inventory UI verified live on BDS 1.26.45.1 + spawn link form + compass trigger
 
 ### Task

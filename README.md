@@ -131,7 +131,8 @@ little/big endian. Exit 0 = patched or already correct.
 1. Player/admin visits `GET /auth/discord/login` → redirected to Discord
 2. Discord redirects back to `GET /auth/discord/callback?code=...`
 3. Backend exchanges the code, upserts `users`, sets an httpOnly JWT
-   session cookie
+   session cookie. Browsers (Accept: text/html) are then redirected to
+   `GET /player` — API clients still get the `{ok, discordTag}` JSON.
 4. `/admin/*` routes read `req.userId` from that cookie (via
    `sessionMiddleware`) and then check RBAC permissions per-route
 
@@ -146,6 +147,29 @@ means:
 - Every request with a session cookie does one extra DB lookup to check revocation — acceptable at this project's scale
 - The JWT's `sub` claim is cross-checked against the `sessions` row its `jti` belongs to (`session.user_id === payload.sub`) — a signature-valid token with the right `sub` but an unrelated `jti` is rejected. Closes an impersonation path that would otherwise exist if `JWT_SECRET` were ever leaked.
 - A periodic job (`startSessionCleanupJob()`, hourly) deletes `sessions` rows that are expired or revoked — pure table hygiene, doesn't affect any currently-valid session. `POST /admin/sessions/cleanup-check` (gated behind `auth.manage`, `013_auth_permission.sql`) triggers it immediately for ops/testing.
+
+## Player web
+
+`GET /player` serves a small embed-free panel (HTML/CSS/JS all served
+from the backend itself — no static dir, no build step, everything lives
+in `backend/src/web/playerWeb.ts`):
+
+- logged out → "Login with Discord" button (`/auth/discord/login`)
+- logged in but no character → one-field "create character" form
+- logged in → character card (linked/whitelist status), a **generate
+  link code** button (the web-side half of the `!link <code>` flow
+  below), wallet with recent transactions, carried inventory with
+  weights, and owned containers with their contents + capacity
+
+It speaks nothing new — plain session cookies + same-origin `fetch`
+against the existing `/character`, `/character/link-code`,
+`/character/wallet`, `/character/inventory`, and `/inventories` routes.
+`GET /` redirects here, and the Discord OAuth callback does too for
+browser clients. The player router overrides the global
+`Content-Security-Policy` on its three routes only (relaxed to
+`default-src 'self'; script-src 'self'; ...`, still `frame-ancestors
+'none'`, no inline scripts/styles) so the panel is actually usable while
+the rest of the API stays locked down.
 
 ## Inventory
 

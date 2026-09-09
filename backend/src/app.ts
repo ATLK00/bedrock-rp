@@ -11,6 +11,7 @@ import { shopRouter } from "./modules/shop/routes.js";
 import { casesRouter } from "./modules/cases/routes.js";
 import { inventoryRouter } from "./modules/inventory/routes.js";
 import { authLimiter, bridgeLimiter, adminLimiter } from "./middleware/rateLimit.js";
+import { playerWebRouter } from "./web/playerWeb.js";
 import { requestLogger } from "./middleware/logging.js";
 import { securityHeaders, cors, jsonParseError } from "./middleware/security.js";
 import { verifyBridgeSignature, BridgeSignatureError } from "./modules/bridge/signature.js";
@@ -131,6 +132,11 @@ export function createApp(): express.Express {
   app.use("/inventories", adminLimiter, inventoryRouter);
   app.use("/bridge", bridgeLimiter, bridgeRouter);
   app.use("/admin", adminLimiter, adminRouter);
+
+  // Player-facing web. Mounted after the JSON/routers (same-origin, no
+  // rate limit — it's static + reuses the session-authenticated routes).
+  app.use("/player", playerWebRouter);
+  app.get("/", (_req, res) => res.redirect("/player"));
 
   // Normalize body-parse failures (invalid JSON, body too large) before the
   // generic handler so they get our standard error shape, not HTML/stack.

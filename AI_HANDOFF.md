@@ -179,13 +179,16 @@
 
 ## Pending (features/tooling not built yet — not blocked items)
 - Inventory UI decision: RESOLVED 2026-09-09 — in-game via `@minecraft/server-ui`
-  (RP inventory is a separate system from the vanilla backpack), with a
-  player-web inventory viewer to follow later on top of the existing
-  `/character/inventory` + `/inventories/*` routes. Built and **VERIFIED LIVE**
-  on BDS 1.26.45.1 with a real client (2026-09-09): `world.beforeEvents.chatSend`
-  confirmed as the real chat hook, `!inv`/compass open the form, the link-code
-  form auto-pops on first spawn for unlinked accounts, linked accounts get a
-  one-time "เชื่อมต่อแล้ว" message. RESOLVED during live verification:
+  (RP inventory is a separate system from the vanilla backpack), with the
+  player-web viewer now BUILT on top of the existing `/character/inventory` +
+  `/inventories/*` routes (`backend/src/web/playerWeb.ts`: `GET /player` panel
+  with Discord login, character creation, link-code generation, wallet,
+  carried items + containers; served with a relaxed same-origin CSP from the
+  same process). In-game UI **VERIFIED LIVE** on BDS 1.26.45.1 with a real
+  client (2026-09-09): `world.beforeEvents.chatSend` confirmed as the real
+  chat hook, `!inv`/compass open the form, the link-code form auto-pops on
+  first spawn for unlinked accounts, linked accounts get a one-time
+  "เชื่อมต่อแล้ว" message. RESOLVED during live verification:
   `@minecraft/server-chat` does **NOT** exist as a module on this build
   ("depends on unknown module" for both 1.0.0 and 1.0.0-beta) — previous
   handlers were correct to use `world.beforeEvents.chatSend`; do not try to
@@ -196,8 +199,9 @@
 
 > CI gate (build + `npm test` + level.dat self-check), the `level.dat` NBT
 > patch automation (`tools/leveldat_patch.py`), deploy/backup tooling
-> (`ops/docker-compose.prod.yml`, `ops/backup.sh`, `ops/README.md`), and the
-> in-game inventory UI (`!inv` + bridge inventory endpoints) are now DONE.
+> (`ops/docker-compose.prod.yml`, `ops/backup.sh`, `ops/README.md`), the
+> in-game inventory UI (`!inv` + bridge inventory endpoints), and the player
+> web panel (`GET /player`, 22-test suite) are now DONE.
 
 > Note: the `characters.xuid` rename is DONE (migration 015) — do not treat it
 > as pending. Historical CHANGELOG entries that mention it as pending are
@@ -272,12 +276,15 @@ CI gate (`.github/workflows/ci.yml`), the `level.dat` NBT patch automation
 (`tools/leveldat_patch.py`), deploy/backup tooling
 (`ops/docker-compose.prod.yml` + `ops/backup.sh`), and the in-game inventory
 UI (verified live on BDS 1.26.45.1: `!inv` + compass trigger + spawn link
-form + `@minecraft/server-chat` finding) are all done.
+form + `@minecraft/server-chat` finding), and the player web panel
+(`GET /player`: Discord login → character → link-code → wallet/inventory,
+22-test suite) are all done.
 Remaining verified-gap: live Discord OAuth was user-confirmed (2026-09-09)
 but not independently observed in this environment; the "heartbeat-after-leave
 drops presence" drop is HTTP-suite covered and can be observed live with a
-documented curl check if desired. After those: player-web layer (inventory
-viewer + wallets) on top of the existing session routes, then the
+documented curl check if desired; the player web panel is covered by the
+integration suite but hasn't had a real-browser pass yet (quick check on the
+live server: open `http://<host>:8080/` in a browser). After those: the
 vanilla-36-slot-size confirmation against the real world.
 
 ## Do Not Change

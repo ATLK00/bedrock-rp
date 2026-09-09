@@ -1185,6 +1185,31 @@ test("integration suite", async (t) => {
     assert.ok(!aAll.cases.some((c: any) => Number(c.id) === caseId), "other user's list must exclude B's case");
   });
 
+  // 20. player web: pages serve under relaxed CSP + root redirect
+  await t.test("player web: pages serve under relaxed CSP + root redirect", async () => {
+    // root redirects humans to the panel
+    const root = await fetch(`${baseUrl}/`, { redirect: "manual" });
+    assert.equal(root.status, 302);
+    assert.equal((root.headers.get("location") || "").endsWith("/player"), true);
+
+    // HTML page + external assets, no auth required, relaxed but safe CSP
+    const page = await get("/player", { accept: "text/html" });
+    assert.equal(page.status, 200);
+    assert.equal((page.headers.get("content-type") || "").includes("text/html"), true);
+    const csp = page.headers.get("content-security-policy") || "";
+    assert.ok(csp.includes("default-src 'self'"), "player CSS relaxes global default-src 'none'");
+    assert.ok(csp.includes("script-src 'self'"), "no inline scripts allowed");
+    assert.ok(csp.includes("frame-ancestors 'none'"), "stop being embedded");
+
+    const css = await get("/player/app.css");
+    assert.equal(css.status, 200);
+    assert.equal((css.headers.get("content-type") || "").includes("text/css"), true);
+
+    const js = await get("/player/app.js");
+    assert.equal(js.status, 200);
+    assert.equal((js.headers.get("content-type") || "").includes("javascript"), true);
+  });
+
   // cleanup
   await new Promise<void>((resolve) => ctx.server.close(() => resolve()));
   await pool.end();

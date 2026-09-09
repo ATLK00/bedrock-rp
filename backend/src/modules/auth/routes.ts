@@ -75,6 +75,12 @@ authRouter.get("/discord/callback", async (req, res) => {
     const user = await exchangeDiscordCode(code);
     const token = await issueSessionToken(user.id);
     setSessionCookie(res, token);
+    // Browser navigation (the Player Web login flow) lands on the panel;
+    // API clients that fetched this endpoint with a JSON accept header
+    // still get the machine-readable body.
+    if ((req.headers.accept ?? "").includes("text/html")) {
+      return res.redirect("/player");
+    }
     res.json({ ok: true, discordTag: user.discord_tag });
   } catch (err: any) {
     // Security-relevant: a failed login with a *valid* state means the
