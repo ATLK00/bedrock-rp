@@ -7,6 +7,38 @@
   real infrastructure; a small set of infrastructure-dependent paths remains
   explicitly unverified (listed below under **Unverified**).
 
+## 2026-09-09 Round 8 — Vehicle system (auto dealership → owned cars, end-to-end)
+
+- User's Car AllDay Town addon integrated as a **server-authoritative vehicle
+  system**: migration `025_vehicles.sql` (vehicles table, char garage
+  capacity, key/repair-part items), `backend/src/modules/vehicle/index.ts`
+  (new), bridge `/bridge/vehicle/{mine,deploy,store,lock,refuel,repair,state,
+  shop,buy,sell,transfer,reconcile}` (shared-HMAC, actor = persistentId, staff
+  bypass `vehicle.manage`), admin routes in `admin/index.ts`
+  (list/detail+trunk/create/grant/repair/maintenance/seize/delete), player
+  web garage card, admin web "vehicles" tab, and the pack UI in
+  `behavior_pack/scripts/vehicle_ui.js` (`!car`/`!vehicle`, sneak-interact,
+  100-tick `runVehicleSync` while ridden, `reconcileVehicleBoot`).
+- Addon vendored at `vehicle_pack/` (BP + RP): the buggy lost its
+  `minecraft:interact` sneak-destroy block and `is_spawnable` (script-only
+  spawn); the addon's compass-tune and stick-audio debug features were
+  removed (compass is the RP inventory UI's trigger).
+- Authority model: `vehicle/state` only reports `drivingTicks` + sensors; the
+  server owns fuel/damage/lock/ownership/keys/sales and echoes the
+  authoritative snapshot. Health only ever decreases on reports, damage only
+  increases, and **unreported sensor fields are untouched** (partial reports
+  can't zero health — `optionalSensor100`).
+- Bugs found & fixed while wiring the integration test (suite now **25/25**):
+  (1) tank started full so the first refuel 409'd — test burns 50 units via
+  ticks first; (2) `clamp01*100` I had originally written treated sensors as
+  0-1 — replaced with `optionalSensor100` min/max; (3) `transferVehicle`
+  pre-granted the key then deleted it inside the tx — deliver key after
+  commit; (4) `buyVehicle` charged the seller instead of the buyer — swapped
+  transfer direction.
+- New web routes verified by the suite: `GET /character/vehicles` (player),
+  `GET/POST/DELETE /admin/vehicles[...]`; `renderVehicles` uses the existing
+  `postJSON` helper (checked).
+
 ## 2026-09-09 Round 7 — `!deduct` in-game (mirror of `!give`) + allow self-grant
 
 - User tested `!give` live and hit the pack's self-grant refusal ("can you
@@ -388,27 +420,30 @@ unusable, purely for table hygiene. Mirrors the trade-expiry job's exact pattern
   someone else's), all covered by the integration suite (now 23 tests).
 
 ## Next Recommended Task
-Automated integration tests (23/23 on the real docker stack), the signed+BDS
+Automated integration tests (25/25 on the real docker stack), the signed+BDS
 pack, `trust proxy` (verified behind a real docker nginx), the backend
 foundation batch (character confirm/lock, multi-currency economy, containers,
 idempotency, cases, security center, OAuth state), the retention/rate-limit
 hardening round, the live BDS re-smoke on current HEAD (2026-09-09 rows), the
-CI gate (`.github/workflows/ci.yml`), the `level.dat` NBT patch automation
-(`tools/leveldat_patch.py`), deploy/backup tooling
+CI gate (`.github/workflows/ci.yml`, green at `fcdfbe5`), the `level.dat` NBT
+patch automation (`tools/leveldat_patch.py`), deploy/backup tooling
 (`ops/docker-compose.prod.yml` + `ops/backup.sh`), the in-game inventory UI
 (verified live on BDS 1.26.45.1: `!inv` + compass trigger + spawn link form +
 `@minecraft/server-chat` finding), the player web panel
-(`GET /player` ..., 22-test suite), and the **admin web panel** (`GET /admin`,
-23-test suite, MASTER_PROMPT §22) are all done.
-Remaining verified-gaps: real-browser passes of `/admin` and `/player` (open
-`http://<host>:8080/` in a browser — both serve valid now, incl. a local
-`node --check` syntax pass on the served JS); live Discord OAuth was
-user-confirmed (2026-09-09) but not independently observed; the
-"heartbeat-after-leave drops presence" drop is HTTP-suite covered and can be
-observed live with a documented curl check; the compass `itemUse` trigger caveat
-and the vanilla-36-slot-size confirmation both still need a real client. Push/C
-I is blocked on a git remote — none is configured and no `gh` CLI is installed;
-run `git remote add origin <url>` / user-creates the repo to unblock CI.
+(`GET /player` ..., 22-test suite), the **admin web panel** (`GET /admin`,
+23-test suite, MASTER_PROMPT §22), and the **vehicle system** (Round 8,
+25-test suite) are all done.
+Remaining verified-gaps: real-browser passes of `/admin`, `/player` and the
+new vehicle admin tab (open `http://<host>:8080/` in a browser — all serve
+valid now, incl. a local `node --check` syntax pass on the served JS);
+**live vehicle verification** — deploy/ride/sync/refuel/repair/sell on a real
+BDS client with the `vehicle_pack/` RP installed (upload it to MCY/World for
+players, install `behavior_pack/scripts/vehicle_ui.js` on the BDS side); live
+Discord OAuth was user-confirmed (2026-09-09) but not independently observed;
+the "heartbeat-after-leave drops presence" drop is HTTP-suite covered and can
+be observed live with a documented curl check; the compass `itemUse` trigger
+caveat and the vanilla-36-slot-size confirmation both still need a real
+client. CI runs on push to `ATLK00/bedrock-rp` master.
 
 ## Do Not Change
 - One Discord account = one character

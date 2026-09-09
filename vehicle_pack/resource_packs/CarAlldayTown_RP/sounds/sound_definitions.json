@@ -1,0 +1,20 @@
+{
+  "format_version": "1.14.0",
+  "sound_definitions": {
+    "custom.car.engine_drive": {
+      "category": "neutral",
+      "sounds": [
+        "sounds/vehicles/engine_drive"
+      ]
+    },
+    "custom.car.gear_shift": {
+      // Limitation (Phase 5): ยังไม่มีไฟล์เสียง gear_shift โดยเฉพาะในโปรเจกต์
+      // จึง reuse ไฟล์ engine_drive เดิมไปก่อน (ปรับ pitch สูง+สั้นให้พอฟังออกว่าเป็นเสียงเปลี่ยนเกียร์)
+      // ตามกฎ "ห้ามสร้าง dependency ใหม่โดยไม่จำเป็น" — แนะนำเปลี่ยนเป็นเสียง "คลิก/กระแทกเกียร์" จริงในอนาคต
+      "category": "neutral",
+      "sounds": [
+        { "name": "sounds/vehicles/engine_drive", "pitch": [1.6, 1.9], "volume": 0.6 }
+      ]
+    }
+  }
+}

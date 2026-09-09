@@ -5,6 +5,12 @@ import { getBridgeConfig } from "./bridgeConfig.js";
 import { hmacSha256Hex } from "./crypto_hmac.js";
 import { openInventoryUi, tryOpenInventoryUi, promptJoinLinkStatus } from "./inventory_ui.js";
 import { tryHandleAdminCommand } from "./admin_commands.js";
+import {
+  tryOpenVehicleUi,
+  handleVehicleInteract,
+  runVehicleSync,
+  reconcileVehicleBoot,
+} from "./vehicle_ui.js";
 
 /**
  * IDENTITY NOTE: `world.afterEvents.playerJoin`'s `event.playerId` is
@@ -199,6 +205,17 @@ world.beforeEvents.chatSend.subscribe((event) => {
     return;
   }
 
+  // In-game vehicle system (`!car`).
+  if (tryOpenVehicleUi(message, event.sender, {
+    postToBackend,
+    getPersistentId: () => persistentIdByName.get(event.sender.name),
+    getPersistentIdByName: (name) => persistentIdByName.get(name),
+    isConfigured: () => !!cachedBridgeConfig,
+  })) {
+    event.cancel = true; // never hit public chat
+    return;
+  }
+
   if (!lower.startsWith("!link ")) return;
 
   event.cancel = true; // never let this hit public chat, whether it succeeds or fails
@@ -272,6 +289,41 @@ world.afterEvents.itemUse.subscribe((event) => {
     getPersistentId: () => persistentIdByName.get(event.source.name),
     isConfigured: () => !!cachedBridgeConfig,
   });
+});
+
+// Vehicle system: world-side handling of megaverse: cars (sneak-interact menu,
+// locked-car feedback), per-vehicle sensor sync while being driven, and the
+// once-at-boot reconcile that returns stranded 'deployed' vehicles to the
+// garage (the Car AllDay Town addon = pure physics, no opinion on state).
+world.afterEvents.playerInteractWithEntity.subscribe((event) => {
+  if (!cachedBridgeConfig) return;
+  handleVehicleInteract(event, {
+    postToBackend,
+    getPersistentId: () => persistentIdByName.get(event.player.name),
+    getPersistentIdByName: (name) => persistentIdByName.get(name),
+    isConfigured: () => !!cachedBridgeConfig,
+  });
+});
+
+system.runInterval(() => {
+  if (!cachedBridgeConfig) return;
+  runVehicleSync({
+    postToBackend,
+    getPersistentId: () => "",
+    getPersistentIdByName: () => null,
+    isConfigured: () => !!cachedBridgeConfig,
+  });
+}, 100); // every ~5s (matches vehicle_ui.js SYNC_INTERVAL_TICKS)
+
+system.run(() => {
+  if (cachedBridgeConfig) {
+    reconcileVehicleBoot({
+      postToBackend,
+      getPersistentId: () => "",
+      getPersistentIdByName: () => null,
+      isConfigured: () => !!cachedBridgeConfig,
+    });
+  }
 });
 
 system.run(() => {

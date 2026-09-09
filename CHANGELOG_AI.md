@@ -50,6 +50,89 @@
 ...
 
 ---
+## [2026-09-09 21:10] — AI: big-pickle (opencode) — Vehicle system (auto dealership → owned cars)
+
+### Task
+Priority-1 user request: vehicles as owned property (keys, garage, fuel,
+damage, lock, repair, transfer, player sales + dealership purchase), driving
+them in-game via the user's Car AllDay Town addon, with the backend as the
+single authority and audit on every action.
+
+### Changed
+- `backend/migrations/025_vehicles.sql` — new tables: `vehicles` (plate, type,
+  status garage/deployed/seized, owner, fuel, engine/suspension health,
+  body_damage, locked, trunk `inventory_id`), vehicle ownership rows on
+  `characters`, `items` seed for `rp:vehicle_key` + `rp:vehicle_repair_kit`
+  parts, `inventory_slots` metadata for key→vehicle binding.
+- `backend/src/modules/vehicle/index.ts` (new) — server-authoritative engine:
+  create/grant key/deploy/store/lock/refuel/repair/state/sell/unlist/buy/
+  transfer/seize/delete/maintenance override/reconcile/garage summary;
+  plate generator `RP-XXXXX`, key = single `rp:vehicle_key` moved atomically,
+  refuel 10¢/unit, repair = parts via shop, sensors never heal, partial
+  sensor reports can't zero health.
+- `backend/src/modules/bridge/index.ts` — `POST /bridge/vehicle/*` (mine,
+  deploy, store, lock, refuel, repair, state, shop, buy, sell, transfer,
+  reconcile) all shared-HMAC signed; actor identity = persistentId → character;
+  staff bypass via `vehicle.manage`; `vehicleCall` maps 400/403/404/409/500.
+- `backend/src/modules/admin/index.ts` — `/admin/vehicles` CRUD + grant/seize/
+  repair/maintenance (requires `vehicle.manage`, list is `vehicle.view`).
+- `backend/src/web/playerWeb.ts` — garage card (`GET /character/vehicles`).
+- `backend/src/web/adminWeb.ts` — new "vehicles" tab (list/create/grant/
+  repair/seize/delete).
+- Addon vendored at `vehicle_pack/` + `behavior_pack/scripts/vehicle_ui.js`
+  (new) — `!car`/`!vehicle` menu, sneak-interact to open, deploy rayscan,
+  store/lock/refuel/repair/sell/unlist/transfer (online-player dropdown)/
+  dealership shop buy; `runVehicleSync` reports driving ticks+sensors every
+  100 ticks while ridden and applies the echoed server snapshot;
+  `reconcileVehicleBoot` sweeps orphan megaverse: entities at world load.
+- `vehicle_pack` buggy.json — removed `minecraft:interact` sneak-destroy
+  block, `is_spawnable: false` (script-only spawn); main.js trimmed of the
+  compass-tune/stick-audio debug features (compass belongs to the RP
+  inventory UI); `behavior_pack/scripts/main.js` wires chat/interact/sync/boot.
+
+### Why
+Single source of truth for money/governance: the pack is physics-only, every
+mutation lands in Postgres with an audit row, and `vehicle.state` echoes an
+authoritative snapshot back to the entity.
+
+### Dependencies / Impact
+- Migration 025 applies on next `npm run migrate` / test bootstrap.
+- `vehicle_pack/` is the vendored addon (RP pack ships to clients alongside
+  bedrock-rp packs); original zip stays untracked (gitignored `*.zip`).
+
+### Tests
+- [PASS] suite **25/25** (new "vehicles: full lifecycle" test): unlinked 404,
+  admin create + key issuance, non-owner 403s, bridge `mine` + web garage,
+  deploy + redeploy 409, lock/unlock, refuel 50u→500¢ + full-tank 409, sensor
+  state (2400 ticks burns 1 fuel, engine min / body max semantics, heal
+  report ignored), repair 45¢ + nothing-to-repair 409, store, transfer (key
+  moves), sell 20000 + shop listing, buy (transfer path) + dealership buy
+  (debit path), admin list/detail/maintenance, seize blocks store/grant/
+  deploy, delete cleans keys + trunk inventory, reconcile stranded deploy,
+  audit rows for the 14 vehicle actions.
+- [PASS] `npm run build` clean; `node --check` on `vehicle_ui.js`, both
+  `main.js` pack entry files + the served admin/player app.js.
+
+### Security
+As above — pack never authorizes; RBAC + per-route permission checks; audit
+row written for every vehicle transition; partial reports can't grant fuel or
+heal.
+
+### Known Issues
+- Admin web `renderVehicles` create form accepts any entityType string; the
+  RP type must match a registered vehicle type to be usable in-game.
+- Vehicle area/despawn safety nets (e.g. storing a vehicle that fell into the
+  void) are best-effort — reconcile is the hard reset.
+
+### Next Steps
+- Upload the `vehicle_pack/` RP to the MCY/World the players join; install
+  `behavior_pack/scripts/vehicle_ui.js` on the BDS side; live-test deploy +
+  ride + sync on a real client.
+
+### Handoff Notes
+- See AI_HANDOFF Round 8.
+
+---
 ## [2026-09-09 18:10] — AI: big-pickle (opencode) — `!deduct` in-game + allow self-grant
 
 ### Task

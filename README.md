@@ -36,14 +36,23 @@ audit-logged. Built per `docs/MASTER_PROMPT.md`.
 - **Ops hardening**: CORS allowlist + security headers middleware, `/health/live` +
   `/health/ready`, fail-fast server timeouts, OAuth `state` (login-CSRF) protection,
   structured bridge logs, global error handler with error codes.
+- **Vehicles**: server-authoritative ownership (keys are `rp:vehicle_key` items),
+  garage capacity per character, deploy/store around the server, fuel (burned per
+  driving tick, refuel 10¢/unit), engine/suspension/body state (sensors only ever
+  make it worse; repair restores at shop prices), lock, free transfer, player
+  sale listings + dealership purchases, seized/delete for staff. Bridge
+  `/bridge/vehicle/*` and admin `/admin/vehicles/*` routes; the Car AllDay Town
+  addon is vendored at `vehicle_pack/` (pack only reports ticks/sensors — the
+  server is the single authority).
 - **Admin surface**: audit-log viewer (`GET /admin/audit`, incl. `before/after/reason`),
   multi-currency economy reads (`GET /admin/economy/character/:id`), container CRUD,
   character update/view (locked-field approval path).
 
 Integration suite (`backend/src/test/integration.test.ts`) runs against a throwaway
-`bedrock_rp_test` DB (17 tests: auth, character create/link/delete/details-lock-case,
+`bedrock_rp_test` DB (25 tests: auth, character create/link/delete/details-lock-case,
 bridge secret/signature/replay, presence + stale-heartbeat, RBAC, economy
-cash/bank/red-money/anomaly/idempotency, inventory weight + containers, cases, security events).
+cash/bank/red-money/anomaly/idempotency, inventory weight + containers, cases,
+security events, vehicles full lifecycle).
 Spec: `npm run migrate`, `npm run build`, `npm test` (needs `ops` docker stack up).
 
 **Not locked yet** — do not assume:

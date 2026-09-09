@@ -1,0 +1,406 @@
+{
+	"namespace": "hud",
+
+	"server_panel": {
+		"type": "panel",
+		"size": ["100%", "100%c"],
+		"controls": [
+			{ "ntf_popup@hud.ntf_popup": {} }
+		]
+	},
+
+	"error_panel": {
+		"type": "panel",
+		"size": ["100%", "100%c"],
+		"controls": [
+			{ "ntf_error@hud.ntf_error": {} },
+			{ "ntf_suc@hud.ntf_suc": {} },
+			{ "ntf_sv@hud.ntf_sv": {} }
+		]
+	},
+
+	"loading_panel": {
+		"type": "panel",
+		"size": ["100%", "100%"],
+		"anchor_from": "center",
+		"anchor_to": "center",
+		"controls": [
+			{ "ntf_loading@hud.ntf_loading": {} }
+		]
+	},
+
+	"ntf_loading": {
+		"type": "panel",
+		"size": ["100%", "100%"],
+		"anchor_from": "center",
+		"anchor_to": "center",
+		"layer": 9999,
+		"bindings": [
+			{ "binding_name": "#text" },
+			{ "binding_type": "view", "source_property_name": "(('%.12s' * #text) = 'ntf_loading.')", "target_property_name": "#visible" }
+		],
+		"controls": [
+			{
+				"background_elements": {
+					"type": "panel",
+					"size": ["100%", "100%"],
+					"controls": [
+						{
+							"background_image": {
+								"type": "image",
+								"texture": "textures/ui/loading_background_image",
+								"size": ["150%", "150%"],
+								"anchor_from": "center",
+								"anchor_to": "center",
+								"alpha": "@hud.wait_then_fade",
+								"layer": 0
+							}
+						},
+						{
+							"background_fade": {
+								"type": "image",
+								"texture": "textures/ui/black",
+								"size": ["150%", "70%"],
+								"offset": [0, 15],
+								"anchor_from": "bottom_middle",
+								"anchor_to": "bottom_middle",
+								"alpha": "@hud.dark_overlay_anim",
+								"layer": 1
+							}
+						}
+					]
+				}
+			},
+			{
+				"logo": {
+					"type": "image",
+					"texture": "textures/ui/allday_logo",
+					"size": ["300px", "200px"],
+					"anchor_from": "center",
+					"anchor_to": "center",
+					"offset": ["0px", "-15px"],
+					"keep_ratio": true,
+					"alpha": "@hud.wait_then_fade",
+					"layer": 2
+				}
+			},
+			{
+				"spinner_image": {
+					"type": "image",
+					"texture": "textures/ui/loading_spinner",
+					"size": ["16px", "16px"],
+					"uv_size": [8, 8],
+					"anchor_from": "center",
+					"anchor_to": "center",
+					"offset": ["0px", "80px"],
+					"uv": "@hud.loading_spinner_anim",
+					"alpha": "@hud.wait_then_fade",
+					"layer": 3
+				}
+			}
+		]
+	},
+
+	"ntf_popup": {
+		"type": "image", "anchor_to": "top_middle", "anchor_from": "top_middle", "texture": "textures/ui/ntf_bg",
+		"size": ["100%c + 45px", "30px"], "offset": "@hud.test_anim", "layer": 998,
+		"bindings": [
+			{ "binding_name": "#text" },
+			{ "binding_type": "view", "source_property_name": "(('%.11s' * #text) = 'ntf_server.')", "target_property_name": "#visible" },
+			{ "binding_type": "view", "source_property_name": "(#text - 'ntf_server.')", "target_property_name": "#adv_text" }
+		],
+		"controls": [
+			{
+				"text": { "type": "label","font_type": "MinecraftTen", "layer": 999, "text": "#text", "anchor_to": "left_middle", "anchor_from": "left_middle", "offset": ["35px", "-6px"], "size": ["default", "default"], "localize": true, "bindings": [ { "binding_type": "view", "source_control_name": "ntf_popup", "source_property_name": "#adv_text", "target_property_name": "#text", "resolve_sibling_scope": true }, { "binding_type": "view", "source_property_name": "(not (#text = ''))", "target_property_name": "#visible" } ] }
+			},
+			{
+				"icon": { "type": "image", "layer": 1000, "size": ["30px", "30px"], "anchor_from": "left_middle", "anchor_to": "left_middle", "offset": ["2px", "0px"], "keep_ratio": true, "texture": "textures/ui/meaw_icon" }
+			}
+		]
+	},
+
+	"ntf_error": {
+		"type": "image", "anchor_to": "top_right", "anchor_from": "top_right", "texture": "textures/ui/error_bg",
+		"size": ["100%c + 4px", "20px"], "offset": "@hud.slide_rl_anim", "layer": 996,
+		"bindings": [
+			{ "binding_name": "#text" },
+			{ "binding_type": "view", "source_property_name": "(('%.10s' * #text) = 'ntf_error.')", "target_property_name": "#visible" }
+		],
+		"controls": [
+			{
+				"content_stack": {
+					"type": "stack_panel", "orientation": "vertical", "size": ["100%c", "100% - 4px"], "anchor_to": "left_middle", "anchor_from": "left_middle", "offset": ["20px", 0],
+					"controls": [
+						{ "title": { "type": "label", "text": "Error", "color": [1.0, 0.3, 0.3], "size": ["40px", "9px"], "font_scale_factor": 0.8 } },
+						{ "text": { "type": "label", "size": ["default", "9px"], "text": "#text", "localize": true, "font_scale_factor": 0.8, "bindings": [ { "binding_name": "#text" }, { "binding_type": "view", "source_property_name": "(#text - 'ntf_error.')", "target_property_name": "#text" } ] } }
+					]
+				}
+			},
+			{
+				"icon": { "type": "image", "layer": 997, "size": ["8px", "8px"], "anchor_from": "left_middle", "anchor_to": "left_middle", "offset": ["6px", "0px"], "keep_ratio": true, "texture": "textures/ui/error_icon" }
+			}
+		]
+	},
+
+	"ntf_suc": {
+		"type": "image", "anchor_to": "top_right", "anchor_from": "top_right", "texture": "textures/ui/suc_bg",
+		"size": ["100%c + 4px", "20px"], "offset": "@hud.slide_rl_anim", "layer": 994,
+		"bindings": [
+			{ "binding_name": "#text" },
+			{ "binding_type": "view", "source_property_name": "(('%.8s' * #text) = 'ntf_suc.')", "target_property_name": "#visible" }
+		],
+		"controls": [
+			{
+				"content_stack": {
+					"type": "stack_panel", "orientation": "vertical", "size": ["100%c", "100% - 4px"], "anchor_to": "left_middle", "anchor_from": "left_middle", "offset": ["20px", 0],
+					"controls": [
+						{ "title": { "type": "label", "text": "Successful", "color": [0.3, 1.0, 0.3], "size": ["40px", "9px"], "font_scale_factor": 0.8 } },
+						{ "text": { "type": "label", "size": ["default", "9px"], "text": "#text", "localize": true, "font_scale_factor": 0.8, "bindings": [ { "binding_name": "#text" }, { "binding_type": "view", "source_property_name": "(#text - 'ntf_suc.')", "target_property_name": "#text" } ] } }
+					]
+				}
+			},
+			{
+				"icon": { "type": "image", "layer": 995, "size": ["8px", "8px"], "anchor_from": "left_middle", "anchor_to": "left_middle", "offset": ["6px", "0px"], "keep_ratio": true, "texture": "textures/ui/suc_icon" }
+			}
+		]
+	},
+
+	"ntf_sv": {
+		"type": "image", "anchor_to": "top_right", "anchor_from": "top_right", "texture": "textures/ui/sv_bg",
+		"size": ["100%c + 4px", "20px"], "offset": "@hud.slide_rl_anim", "layer": 992,
+		"bindings": [
+			{ "binding_name": "#text" },
+			{ "binding_type": "view", "source_property_name": "(('%.7s' * #text) = 'ntf_sv.')", "target_property_name": "#visible" }
+		],
+		"controls": [
+			{
+				"content_stack": {
+					"type": "stack_panel", "orientation": "vertical", "size": ["100%c", "100% - 4px"], "anchor_to": "left_middle", "anchor_from": "left_middle", "offset": ["25px", -2],
+					"controls": [
+						{ "title": { "type": "label", "text": "ALLDAY TOWN", "color": [0.33, 1.0, 1.0], "size": ["50px", "9px"], "font_type": "MinecraftTen","font_scale_factor": 0.8 } },
+						{ "text": { "type": "label", "size": ["default", "9px"], "text": "#text", "localize": true, "font_scale_factor": 0.8, "bindings": [ { "binding_name": "#text" }, { "binding_type": "view", "source_property_name": "(#text - 'ntf_sv.')", "target_property_name": "#text" } ] } }
+					]
+				}
+			},
+			{
+				"icon": { "type": "image", "layer": 993, "size": ["22px", "22px"],"anchor_from": "left_middle", "anchor_to": "left_middle", "offset": [2, -1], "keep_ratio": true, "texture": "textures/ui/allday_icon" }
+			}
+		]
+	},
+
+	"test_anim": { "anim_type": "offset", "easing": "out_sine", "next": "@hud.test_anim2", "from": ["0%", "-100%c - 40px"], "to": ["0%", "40px"], "duration": 0.5 },
+	"test_anim2": { "anim_type": "wait", "next": "@hud.test_anim3", "duration": 4 },
+	"test_anim3": { "anim_type": "offset", "easing": "in_sine", "from": ["0%", "40px"], "to": ["0%", "-100%c - 40px"], "duration": 0.5, "destroy_at_end": "chat_grid_item" },
+	
+	"slide_rl_anim": { "anim_type": "offset", "easing": "out_sine", "next": "@hud.slide_rl_anim2", "from": ["250px", "5px"], "to": ["20px", "5px"], "duration": 0.5 },
+	"slide_rl_anim2": { "anim_type": "wait", "next": "@hud.slide_rl_anim3", "duration": 4 },
+	"slide_rl_anim3": { "anim_type": "offset", "easing": "in_sine", "from": ["20px", "5px"], "to": ["250px", "5px"], "duration": 0.5, "destroy_at_end": "chat_grid_item" },
+
+	"timer_wait": { "anim_type": "wait", "duration": 0.5, "next": "@hud.timer_anim" },
+	"timer_anim": { "anim_type": "size", "from": ["100%", "100%"], "to": ["0%", "100%"], "duration": 4 },
+
+	"wait_then_fade": { "anim_type": "wait", "duration": 10.0, "next": "@hud.fade_out_anim" },
+	"fade_out_anim": { "anim_type": "alpha", "easing": "out_sine", "from": 1.0, "to": 0.0, "duration": 1.0 },
+
+	"dark_overlay_anim": { "anim_type": "alpha", "from": 1.0, "to": 1.0, "duration": 10.0, "next": "@hud.fade_out_anim_destroy" },
+	"fade_out_anim_destroy": { "anim_type": "alpha", "easing": "out_sine", "from": 1.0, "to": 0.0, "duration": 1.0, "destroy_at_end": "chat_grid_item" },
+
+	"loading_spinner_anim": {
+		"anim_type": "flip_book",
+		"initial_uv": [0, 0],
+		"frame_count": 20,
+		"frame_step": 8,
+		"fps": 20,
+		"reversible": false
+	},
+
+	"server_factory": { "type": "stack_panel", "size": ["100%", "100%"], "factory": { "name": "chat_item_factory", "control_ids": { "chat_item": "server_panel@hud.server_panel" } } },
+	"error_factory": { "type": "stack_panel", "size": ["100%", "100%"], "factory": { "name": "chat_item_factory", "control_ids": { "chat_item": "error_panel@hud.error_panel" } } },
+	
+	"loading_factory": { "type": "panel", "size": ["100%", "100%"], "factory": { "name": "chat_item_factory", "control_ids": { "chat_item": "loading_panel@hud.loading_panel" } } },
+	
+	"chat_grid_item/chat_background": {
+		"bindings": [ { "binding_type": "view", "source_property_name": "((((((('§␛' + #text + '§r') - ('§␛' + 'ntf_server.')) - ('§␛' + 'ntf_error.')) - ('§␛' + 'ntf_suc.')) - ('§␛' + 'ntf_sv.')) - ('§␛' + 'ntf_loading.')) = ('§␛' + #text + '§r'))", "target_property_name": "#visible" } ]
+	},
+
+    "hud_title_text/title_frame": {
+        "bindings": [
+            {
+                "binding_type": "view",
+                "source_control_name": "title",
+                "source_property_name": "((#text - 'car:') = #text)",
+                "target_property_name": "#visible"
+            }
+        ]
+    },
+
+    "master_ui_controller": {
+        "type": "panel",
+        "controls": [
+            {
+                "data_control": {
+                    "type": "panel",
+                    "bindings": [
+                        { "binding_name": "#hud_title_text_string" },
+                        { "binding_name": "#hud_title_text_string", "binding_name_override": "#p_data", "binding_condition": "visibility_changed" },
+                        { "binding_type": "view", "source_property_name": "(not (#hud_title_text_string = #p_data) and not ((#hud_title_text_string - 'car:') = #hud_title_text_string))", "target_property_name": "#visible" }
+                    ]
+                }
+            }
+        ],
+        "bindings": [
+            { "binding_type": "view", "source_control_name": "data_control", "source_property_name": "#p_data", "target_property_name": "#raw_string" },
+
+            { "binding_type": "view", "source_property_name": "(#raw_string - 'car:')", "target_property_name": "#speed_str" },
+            { "binding_type": "view", "source_property_name": "(#speed_str * 1.0)", "target_property_name": "#speed_num" },
+
+            { "binding_type": "view", "source_property_name": "('car:' + #speed_num + ' ')", "target_property_name": "#pre_gear" },
+            { "binding_type": "view", "source_property_name": "(#raw_string - #pre_gear)", "target_property_name": "#gear_str" },
+            { "binding_type": "view", "source_property_name": "(#gear_str * 1.0)", "target_property_name": "#gear_num" },
+
+            { "binding_type": "view", "source_property_name": "(#pre_gear + #gear_num + ' ')", "target_property_name": "#pre_fl" },
+            { "binding_type": "view", "source_property_name": "(#raw_string - #pre_fl)", "target_property_name": "#fl_str" },
+            { "binding_type": "view", "source_property_name": "(#fl_str * 1.0)", "target_property_name": "#fl_num" },
+
+            { "binding_type": "view", "source_property_name": "(#pre_fl + #fl_num + ' ')", "target_property_name": "#pre_fr" },
+            { "binding_type": "view", "source_property_name": "(#raw_string - #pre_fr)", "target_property_name": "#fr_str" },
+            { "binding_type": "view", "source_property_name": "(#fr_str * 1.0)", "target_property_name": "#fr_num" },
+
+            { "binding_type": "view", "source_property_name": "(#pre_fr + #fr_num + ' ')", "target_property_name": "#pre_rl" },
+            { "binding_type": "view", "source_property_name": "(#raw_string - #pre_rl)", "target_property_name": "#rl_str" },
+            { "binding_type": "view", "source_property_name": "(#rl_str * 1.0)", "target_property_name": "#rl_num" },
+
+            { "binding_type": "view", "source_property_name": "(#pre_rl + #rl_num + ' ')", "target_property_name": "#pre_rr" },
+            { "binding_type": "view", "source_property_name": "(#raw_string - #pre_rr)", "target_property_name": "#rr_str" },
+            { "binding_type": "view", "source_property_name": "(#rr_str * 1.0)", "target_property_name": "#rr_num" }
+        ]
+    },
+
+    "car_dashboard_panel": {
+        "type": "panel",
+        "anchor_from": "bottom_middle",
+        "anchor_to": "bottom_middle",
+        "offset": [ 0, -20 ],
+        "size": [ 180, 80 ],
+        "bindings": [
+            { 
+                "binding_type": "view", 
+                "source_control_name": "master_ui_controller", 
+                "source_property_name": "((not ((#raw_string - 'car:') = #raw_string)) and ((#raw_string - 'car:off') = #raw_string))", 
+                "target_property_name": "#visible" 
+            }
+        ],
+        "controls": [
+            {
+                "speedometer": {
+                    "type": "stack_panel", "orientation": "vertical", "anchor_from": "center", "anchor_to": "center", "offset": [ -45, 0 ], "size": [ 50, 30 ],
+                    "controls": [
+                        {
+                            "val_panel": {
+                                "type": "panel", "size": [ "100%", 16 ],
+                                "controls": [
+                                    { "val": { "type": "label", "font_type": "MinecraftTen", "font_scale_factor": 1.4, "color": [ 0.4, 0.9, 1.0 ], "text": "#text", "anchor_from": "center", "anchor_to": "center", "text_alignment": "center", "bindings": [ { "binding_type": "view", "source_control_name": "master_ui_controller", "source_property_name": "('§r' + #speed_num)", "target_property_name": "#text" } ] } }
+                                ]
+                            }
+                        },
+                        {
+                            "lbl_panel": {
+                                "type": "panel", "size": [ "100%", 14 ],
+                                "controls": [
+                                    { "lbl": { "type": "label", "font_type": "MinecraftTen", "font_scale_factor": 0.8, "color": [ 0.7, 0.7, 0.7 ], "text": "KM/H", "anchor_from": "center", "anchor_to": "center", "text_alignment": "center" } }
+                                ]
+                            }
+                        }
+                    ]
+                }
+            },
+            {
+                "gearbox": {
+                    "type": "stack_panel", "orientation": "vertical", "anchor_from": "center", "anchor_to": "center", "offset": [ 40, 0 ], "size": [ 50, 30 ],
+                    "controls": [
+                        { 
+                            "val_panel": { 
+                                "type": "panel", "size": [ "100%", 16 ],
+                                "controls": [
+                                    { "gear_r": { "type": "label", "font_type": "MinecraftTen", "font_scale_factor": 1.4, "color": [ 1.0, 0.3, 0.3 ], "text": "R", "anchor_from": "center", "anchor_to": "center", "text_alignment": "center", "bindings": [ { "binding_type": "view", "source_control_name": "master_ui_controller", "source_property_name": "(#gear_num < 0)", "target_property_name": "#visible", "binding_condition": "always" } ] } },
+                                    { "gear_n": { "type": "label", "font_type": "MinecraftTen", "font_scale_factor": 1.4, "color": [ 0.4, 1.0, 0.4 ], "text": "N", "anchor_from": "center", "anchor_to": "center", "text_alignment": "center", "bindings": [ { "binding_type": "view", "source_control_name": "master_ui_controller", "source_property_name": "(#gear_num = 0)", "target_property_name": "#visible", "binding_condition": "always" } ] } },
+                                    { "gear_d": { "type": "label", "font_type": "MinecraftTen", "font_scale_factor": 1.4, "color": [ 1.0, 0.8, 0.2 ], "text": "#text", "anchor_from": "center", "anchor_to": "center", "text_alignment": "center", "bindings": [ { "binding_type": "view", "source_control_name": "master_ui_controller", "source_property_name": "(#gear_num > 0)", "target_property_name": "#visible", "binding_condition": "always" }, { "binding_type": "view", "source_control_name": "master_ui_controller", "source_property_name": "('§r' + #gear_num)", "target_property_name": "#text" } ] } }
+                                ]
+                            }
+                        },
+                        { 
+                            "lbl_panel": {
+                                "type": "panel", "size": [ "100%", 14 ],
+                                "controls": [
+                                    { "lbl": { "type": "label", "font_type": "MinecraftTen", "font_scale_factor": 0.8, "color": [ 0.7, 0.7, 0.7 ], "text": "GEAR", "anchor_from": "center", "anchor_to": "center", "text_alignment": "center" } }
+                                ]
+                            } 
+                        }
+                    ]
+                }
+            },
+            {
+                "chassis": {
+                    "type": "panel", "anchor_from": "center", "anchor_to": "center", "size": [ 30, 60 ],
+                    "controls": [
+                        { "car_icon": { "type": "image", "texture": "textures/ui/icon_car", "size": [ "100%", "100%" ], "layer": 1 } },
+                        
+                        { "fl_wheel": { 
+                            "type": "panel", "anchor_from": "top_left", "anchor_to": "top_left", "offset": [ -2, 18 ], "size": [ 4, 6 ], 
+                            "controls": [ 
+                                { "bg": { "type": "image", "texture": "textures/ui/tire_bg", "size": [ "100%", "100%" ], "layer": 2 } }, 
+                                { "fill": { "type": "image", "texture": "textures/ui/tire_fill", "size": [ "100%", "100%" ], "layer": 3, "clip_direction": "up", "bindings": [ { "binding_type": "view", "source_control_name": "master_ui_controller", "source_property_name": "(1.0 - #fl_num)", "target_property_name": "#clip_ratio" } ] } } 
+                            ] 
+                        } },
+
+                        { "fr_wheel": { 
+                            "type": "panel", "anchor_from": "top_right", "anchor_to": "top_right", "offset": [ 2, 18 ], "size": [ 4, 6 ], 
+                            "controls": [ 
+                                { "bg": { "type": "image", "texture": "textures/ui/tire_bg", "size": [ "100%", "100%" ], "layer": 2 } }, 
+                                { "fill": { "type": "image", "texture": "textures/ui/tire_fill", "size": [ "100%", "100%" ], "layer": 3, "clip_direction": "up", "bindings": [ { "binding_type": "view", "source_control_name": "master_ui_controller", "source_property_name": "(1.0 - #fr_num)", "target_property_name": "#clip_ratio" } ] } } 
+                            ] 
+                        } },
+
+                        { "rl_wheel": { 
+                            "type": "panel", "anchor_from": "bottom_left", "anchor_to": "bottom_left", "offset": [ -2, -18 ], "size": [ 4, 6 ], 
+                            "controls": [ 
+                                { "bg": { "type": "image", "texture": "textures/ui/tire_bg", "size": [ "100%", "100%" ], "layer": 2 } }, 
+                                { "fill": { "type": "image", "texture": "textures/ui/tire_fill", "size": [ "100%", "100%" ], "layer": 3, "clip_direction": "up", "bindings": [ { "binding_type": "view", "source_control_name": "master_ui_controller", "source_property_name": "(1.0 - #rl_num)", "target_property_name": "#clip_ratio" } ] } } 
+                            ] 
+                        } },
+
+                        { "rr_wheel": { 
+                            "type": "panel", "anchor_from": "bottom_right", "anchor_to": "bottom_right", "offset": [ 2, -18 ], "size": [ 4, 6 ], 
+                            "controls": [ 
+                                { "bg": { "type": "image", "texture": "textures/ui/tire_bg", "size": [ "100%", "100%" ], "layer": 2 } }, 
+                                { "fill": { "type": "image", "texture": "textures/ui/tire_fill", "size": [ "100%", "100%" ], "layer": 3, "clip_direction": "up", "bindings": [ { "binding_type": "view", "source_control_name": "master_ui_controller", "source_property_name": "(1.0 - #rr_num)", "target_property_name": "#clip_ratio" } ] } } 
+                            ] 
+                        } }
+                    ]
+                }
+            }
+        ]
+    },
+
+    "root_panel": {
+        "modifications": [
+            {
+                "array_name": "controls",
+                "operation": "insert_front",
+                "value": [
+                    { "server_factory@hud.server_factory": {} },
+                    { "error_factory@hud.error_factory": {} },
+                    { "loading_factory@hud.loading_factory": {} }
+                ]
+            },
+            {
+                "array_name": "controls",
+                "operation": "insert_back",
+                "value": [
+                    { "master_ui_controller@hud.master_ui_controller": {} },
+                    { "car_dashboard_panel@hud.car_dashboard_panel": {} }
+                ]
+            }
+        ]
+    }
+}

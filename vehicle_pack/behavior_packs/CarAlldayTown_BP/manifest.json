@@ -1,0 +1,24 @@
+{
+  "format_version": 2,
+  "header": {
+    "name": "Car AllDay Town",
+    "description": "Car AllDay Town — Vehicle System (Buggy): Engine/Transmission, Tire/Grip, Suspension, Damage, HUD",
+    "uuid": "e915378d-ec41-4ad5-bdb4-db5c9b51782c",
+    "version": [3, 0, 0],
+    "min_engine_version": [1, 21, 0]
+  },
+  "modules": [
+    {
+      "type": "script",
+      "language": "javascript",
+      "uuid": "6d1bacd6-b206-4a75-93b4-04394ac6d2e0",
+      "entry": "scripts/main.js",
+      "version": [3, 0, 0]
+    }
+  ],
+  "dependencies": [
+    { "module_name": "@minecraft/server", "version": "2.0.0" },
+    { "module_name": "@minecraft/server-ui", "version": "2.1.0" },
+    { "uuid": "c9759c05-d83b-49fe-bc57-de7d12b0890d", "version": [3, 0, 0] }
+  ]
+}

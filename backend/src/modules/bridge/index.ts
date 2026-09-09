@@ -3,6 +3,7 @@ import { consumeLinkCode, InvalidLinkCodeError, PersistentIdAlreadyLinkedError, 
 import { registerPlayerJoin, heartbeat, playerLeft } from "../player_session/index.js";
 import * as inventory from "../inventory/index.js";
 import * as economy from "../economy/index.js";
+import * as vehicle from "../vehicle/index.js";
 import { hasPermission } from "../../rbac/index.js";
 import { emitSecurityEvent } from "../security/index.js";
 
@@ -468,4 +469,290 @@ bridgeRouter.post("/admin/deduct", async (req, res) => {
     logBridge("admin.deduct", req, startedAt, 500);
     return res.status(500).json({ ok: false, message: "Something went wrong deducting money. Try again." });
   }
+});
+
+// ---------------------------------------------------------------------------
+// Vehicles (called by the behavior pack's vehicle_ui.js — `!car` command and
+// the in-world entity handlers). Authority model: ownership/garage/plate/
+// fuel/damage/lock all live here; the pack only reports sensors (ticks driven,
+// damage observed) and applies the authoritative snapshot we echo back.
+// ---------------------------------------------------------------------------
+
+const VALID_VEHICLE_CURRENCIES = new Set<economy.Currency>(["cash", "bank", "red_money"]);
+
+function parseVehicleId(v: unknown): number | null {
+  const n = typeof v === "number" ? v : typeof v === "string" && v.trim() !== "" ? Number(v) : Number.NaN;
+  return Number.isInteger(n) && n > 0 ? n : null;
+}
+
+function pickCurrency(v: unknown): economy.Currency | null {
+  const cur = v === undefined || v === null ? "cash" : String(v);
+  return VALID_VEHICLE_CURRENCIES.has(cur as economy.Currency) ? (cur as economy.Currency) : null;
+}
+
+/** Resolve the live character driving a vehicle action by persistentId. */
+async function requireVehicleActor(res: any, body: any): Promise<{ characterId: number; userId: number } | null> {
+  const { playerId } = (body ?? {}) as { playerId?: unknown };
+  if (!isNonEmptyString(playerId) || playerId.length > MAX_IDENTIFIER_LENGTH) {
+    res.status(400).json({ ok: false, message: "playerId is required." });
+    return null;
+  }
+  const character = await findCharacterByPersistentId(String(playerId));
+  if (!character) {
+    res.status(404).json({ ok: false, message: "This Minecraft account isn't linked to a character yet." });
+    return null;
+  }
+  return { characterId: character.id, userId: character.userId };
+}
+
+/**
+ * Wraps a vehicle action with uniform error -> HTTP mapping, so each route
+ * below is just validation + a one-line module call.
+ */
+async function vehicleCall(req: any, res: any, action: string, fn: () => Promise<object>): Promise<void> {
+  const startedAt = Date.now();
+  try {
+    const result = await fn();
+    logBridge(action, req, startedAt, 200);
+    res.json({ ok: true, ...result });
+  } catch (err: any) {
+    let status = 500;
+    if (err instanceof vehicle.VehicleNotFoundError) status = 404;
+    else if (err instanceof vehicle.VehicleAccessDeniedError) status = 403;
+    else if (err instanceof vehicle.VehicleInUseError || err instanceof vehicle.VehicleGarageFullError) status = 409;
+    else if (err instanceof economy.InsufficientFundsError) status = 409;
+    else if (
+      err instanceof inventory.InventoryFullError ||
+      err instanceof inventory.CarryWeightExceededError ||
+      err instanceof inventory.InsufficientItemsError
+    ) {
+      status = 409;
+    }
+    logBridge(action, req, startedAt, status);
+    res.status(status).json({ ok: false, message: err && err.message ? err.message : "Something went wrong. Try again." });
+  }
+}
+
+/** `!car` -> my garage (owned vehicles with state + garage capacity). */
+bridgeRouter.post("/vehicle/mine", async (req, res) => {
+  const actor = await requireVehicleActor(res, req.body);
+  if (!actor) return;
+  const summary = await vehicle.getGarageSummary(actor.characterId);
+  if (!summary) return res.status(404).json({ ok: false, message: "Character not found." });
+  logBridge("vehicle.mine", req, Date.now(), 200);
+  res.json({ ok: true, ...summary });
+});
+
+/** Deploy a garaged vehicle into the world (status -> deployed; pack spawns the entity). */
+bridgeRouter.post("/vehicle/deploy", async (req, res) => {
+  const actor = await requireVehicleActor(res, req.body);
+  if (!actor) return;
+  const vehicleId = parseVehicleId((req.body ?? {}).vehicleId);
+  if (!vehicleId) return res.status(400).json({ ok: false, message: "vehicleId is required." });
+  const isStaff = await hasPermission(actor.userId, "vehicle.manage");
+  await vehicleCall(req, res, "vehicle.deploy", async () => {
+    const view = await vehicle.deployVehicle({
+      vehicleId, characterId: actor.characterId, isStaff,
+      actorUserId: actor.userId,
+      requestId: (req as unknown as { requestId?: string }).requestId ?? null,
+    });
+    return { vehicle: view };
+  });
+});
+
+/** Send a vehicle back to the garage (pack despawns the entity). */
+bridgeRouter.post("/vehicle/store", async (req, res) => {
+  const actor = await requireVehicleActor(res, req.body);
+  if (!actor) return;
+  const vehicleId = parseVehicleId((req.body ?? {}).vehicleId);
+  if (!vehicleId) return res.status(400).json({ ok: false, message: "vehicleId is required." });
+  const isStaff = await hasPermission(actor.userId, "vehicle.manage");
+  await vehicleCall(req, res, "vehicle.store", async () => {
+    const view = await vehicle.storeVehicle({
+      vehicleId, characterId: actor.characterId, isStaff,
+      actorUserId: actor.userId,
+      requestId: (req as unknown as { requestId?: string }).requestId ?? null,
+    });
+    return { vehicle: view };
+  });
+});
+
+/** Lock / unlock a vehicle (blocks boarding by non-owners via the disabled rideable). */
+bridgeRouter.post("/vehicle/lock", async (req, res) => {
+  const actor = await requireVehicleActor(res, req.body);
+  if (!actor) return;
+  const vehicleId = parseVehicleId((req.body ?? {}).vehicleId);
+  if (!vehicleId) return res.status(400).json({ ok: false, message: "vehicleId is required." });
+  const locked = (req.body ?? {}).locked;
+  if (typeof locked !== "boolean") return res.status(400).json({ ok: false, message: "locked must be a boolean." });
+  const isStaff = await hasPermission(actor.userId, "vehicle.manage");
+  await vehicleCall(req, res, "vehicle.lock", async () => {
+    const view = await vehicle.setVehicleLocked({
+      vehicleId, characterId: actor.characterId, locked, isStaff,
+      actorUserId: actor.userId,
+      requestId: (req as unknown as { requestId?: string }).requestId ?? null,
+    });
+    return { vehicle: view };
+  });
+});
+
+/** Refuel from the wallet — cost settled server-side, fuel only ever added here. */
+bridgeRouter.post("/vehicle/refuel", async (req, res) => {
+  const actor = await requireVehicleActor(res, req.body);
+  if (!actor) return;
+  const { vehicleId, units, currency } = (req.body ?? {}) as { vehicleId?: unknown; units?: unknown; currency?: unknown };
+  const id = parseVehicleId(vehicleId);
+  const cur = pickCurrency(currency);
+  if (!id) return res.status(400).json({ ok: false, message: "vehicleId is required." });
+  if (typeof units !== "number" || !Number.isFinite(units) || units <= 0) {
+    return res.status(400).json({ ok: false, message: "units must be a positive number." });
+  }
+  if (!cur) return res.status(400).json({ ok: false, message: "currency must be cash, bank or red_money." });
+  const isStaff = await hasPermission(actor.userId, "vehicle.manage");
+  await vehicleCall(req, res, "vehicle.refuel", async () => {
+    const { vehicle: view, costCents, refilledUnits } = await vehicle.refuelVehicle({
+      vehicleId: id, characterId: actor.characterId, units, currency: cur, isStaff,
+      actorUserId: actor.userId,
+      requestId: (req as unknown as { requestId?: string }).requestId ?? null,
+    });
+    return { vehicle: view, costCents, refilledUnits };
+  });
+});
+
+/** Repair all mechanical/cosmetic damage — cost = missing health x per-point rates. */
+bridgeRouter.post("/vehicle/repair", async (req, res) => {
+  const actor = await requireVehicleActor(res, req.body);
+  if (!actor) return;
+  const vehicleId = parseVehicleId((req.body ?? {}).vehicleId);
+  const currency = pickCurrency((req.body ?? {}).currency);
+  if (!vehicleId) return res.status(400).json({ ok: false, message: "vehicleId is required." });
+  if (!currency) return res.status(400).json({ ok: false, message: "currency must be cash, bank or red_money." });
+  const isStaff = await hasPermission(actor.userId, "vehicle.manage");
+  await vehicleCall(req, res, "vehicle.repair", async () => {
+    const { vehicle: view, costCents } = await vehicle.repairVehicle({
+      vehicleId, characterId: actor.characterId, currency, isStaff,
+      actorUserId: actor.userId,
+      requestId: (req as unknown as { requestId?: string }).requestId ?? null,
+    });
+    return { vehicle: view, costCents };
+  });
+});
+
+/**
+ * Sensor heartbeat from the pack (no identity required — it's the installed
+ * server speaking, not a player). Fuel is only consumed here; damage/health
+ * only ever increase here. Returns the authoritative snapshot the pack must
+ * apply to the entity.
+ */
+bridgeRouter.post("/vehicle/state", async (req, res) => {
+  const { vehicleId, drivingTicks, engineHealth, suspensionHealth, bodyDamage } = (req.body ?? {}) as {
+    vehicleId?: unknown;
+    drivingTicks?: unknown;
+    engineHealth?: unknown;
+    suspensionHealth?: unknown;
+    bodyDamage?: unknown;
+  };
+  const id = parseVehicleId(vehicleId);
+  if (!id) return res.status(400).json({ ok: false, message: "vehicleId is required." });
+  const ticks = typeof drivingTicks === "number" && Number.isFinite(drivingTicks) ? Math.max(0, drivingTicks) : 0;
+  await vehicleCall(req, res, "vehicle.state", async () => {
+    const view = await vehicle.ingestVehicleState({
+      vehicleId: id,
+      drivingTicks: ticks,
+      engineHealth: typeof engineHealth === "number" && Number.isFinite(engineHealth) ? engineHealth : undefined,
+      suspensionHealth: typeof suspensionHealth === "number" && Number.isFinite(suspensionHealth) ? suspensionHealth : undefined,
+      bodyDamage: typeof bodyDamage === "number" && Number.isFinite(bodyDamage) ? bodyDamage : undefined,
+    });
+    return { vehicle: view };
+  });
+});
+
+/** Dealership / player-for-sale vehicles (read list for `!car shop`). */
+bridgeRouter.post("/vehicle/shop", async (_req, res) => {
+  const vehicles = await vehicle.listVehicles({ forSale: true });
+  logBridge("vehicle.shop", _req, Date.now(), 200);
+  res.json({ ok: true, vehicles });
+});
+
+/** Buy a listed vehicle — money moves first, ownership only on success (refund on race). */
+bridgeRouter.post("/vehicle/buy", async (req, res) => {
+  const actor = await requireVehicleActor(res, req.body);
+  if (!actor) return;
+  const vehicleId = parseVehicleId((req.body ?? {}).vehicleId);
+  if (!vehicleId) return res.status(400).json({ ok: false, message: "vehicleId is required." });
+  await vehicleCall(req, res, "vehicle.buy", async () => {
+    const view = await vehicle.buyVehicle({
+      vehicleId, buyerCharacterId: actor.characterId,
+      actorUserId: actor.userId,
+      requestId: (req as unknown as { requestId?: string }).requestId ?? null,
+    });
+    return { vehicle: view };
+  });
+});
+
+/** List a vehicle for sale / remove the listing (`!car sell`) — seller must own + be parked. */
+bridgeRouter.post("/vehicle/sell", async (req, res) => {
+  const actor = await requireVehicleActor(res, req.body);
+  if (!actor) return;
+  const { vehicleId, priceCents, currency } = (req.body ?? {}) as { vehicleId?: unknown; priceCents?: unknown; currency?: unknown };
+  const id = parseVehicleId(vehicleId);
+  if (!id) return res.status(400).json({ ok: false, message: "vehicleId is required." });
+  if (priceCents !== null && priceCents !== undefined) {
+    if (typeof priceCents !== "number" || !Number.isSafeInteger(priceCents) || priceCents <= 0) {
+      return res.status(400).json({ ok: false, message: "priceCents must be a positive integer or omitted to unlist." });
+    }
+  }
+  const cur = pickCurrency(currency);
+  if (!cur) return res.status(400).json({ ok: false, message: "currency must be cash, bank or red_money." });
+  const isStaff = await hasPermission(actor.userId, "vehicle.manage");
+  await vehicleCall(req, res, "vehicle.sell", async () => {
+    const view = await vehicle.setSaleListing({
+      vehicleId: id, characterId: actor.characterId,
+      priceCents: typeof priceCents === "number" ? priceCents : null,
+      currency: typeof priceCents === "number" ? cur : undefined,
+      isStaff,
+      actorUserId: actor.userId,
+      requestId: (req as unknown as { requestId?: string }).requestId ?? null,
+    });
+    return { vehicle: view };
+  });
+});
+
+/** Free handover to another linked player (key revokes/granted atomically). */
+bridgeRouter.post("/vehicle/transfer", async (req, res) => {
+  const actor = await requireVehicleActor(res, req.body);
+  if (!actor) return;
+  const { vehicleId, targetPersistentId } = (req.body ?? {}) as { vehicleId?: unknown; targetPersistentId?: unknown };
+  const id = parseVehicleId(vehicleId);
+  if (!id) return res.status(400).json({ ok: false, message: "vehicleId is required." });
+  if (!isNonEmptyString(targetPersistentId) || targetPersistentId.length > MAX_IDENTIFIER_LENGTH) {
+    return res.status(400).json({ ok: false, message: "targetPersistentId is required." });
+  }
+  const target = await findCharacterByPersistentId(String(targetPersistentId));
+  if (!target) return res.status(404).json({ ok: false, message: "That player isn't linked to a character on the server." });
+  await vehicleCall(req, res, "vehicle.transfer", async () => {
+    const view = await vehicle.transferVehicle({
+      vehicleId: id, fromCharacterId: actor.characterId, toCharacterId: target.id,
+      actorUserId: actor.userId,
+      requestId: (req as unknown as { requestId?: string }).requestId ?? null,
+    });
+    return { vehicle: view };
+  });
+});
+
+/**
+ * Called once at pack boot: any vehicle marked 'deployed' whose entity no
+ * longer exists (or was never re-acked this boot) returns to the garage,
+ * so a world/server restart can't strand vehicles.
+ */
+bridgeRouter.post("/vehicle/reconcile", async (req, res) => {
+  const deployed = Array.isArray((req.body ?? {}).deployedVehicleIds)
+    ? ((req.body ?? {}).deployedVehicleIds as unknown[]).map(Number)
+    : [];
+  const resetToGarage = await vehicle.reconcileDeployed({
+    deployedVehicleIds: deployed.filter((n) => Number.isInteger(n) && n > 0),
+    requestId: (req as unknown as { requestId?: string }).requestId ?? null,
+  });
+  logBridge("vehicle.reconcile", req, Date.now(), 200);
+  res.json({ ok: true, resetToGarage });
 });

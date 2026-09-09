@@ -1437,8 +1437,268 @@ test("integration suite", async (t) => {
     assert.equal(denied.status, 403);
   });
 
+  // 22. vehicles: full lifecycle over the bridge + admin + player web
+  await t.test("vehicles: create/grant/deploy/store/lock/refuel/repair/state/sell/buy/transfer/seize/reconcile", async () => {
+    const bridgePost = async (path: string, body: unknown) => {
+      const raw = JSON.stringify(body);
+      return fetch(`${baseUrl}${path}`, { method: "POST", headers: signedHeaders(BDS_SECRET, raw), body: raw });
+    };
+    const bridgeJson = async (path: string, body: unknown) =>
+      ((await bridgePost(path, body)).json()) as Promise<any>;
+
+    // fresh linked characters H (buyer, gets the first car) and I (recipient)
+    const h = await upsertUserByDiscordId("2101", "UserH");
+    const tokenH = await issueSessionToken(h.id);
+    assert.equal((await postAs("/character", { name: "Henry" }, tokenH)).status, 201);
+    const i = await upsertUserByDiscordId("2102", "UserI");
+    const tokenI = await issueSessionToken(i.id);
+    assert.equal((await postAs("/character", { name: "Iris" }, tokenI)).status, 201);
+    for (const [tag, xuid] of [["H", "p-H"], ["I", "p-I"]] as const) {
+      const codeRes = await postAs("/character/link-code", {}, tag === "H" ? tokenH : tokenI);
+      const { code } = await codeRes.json();
+      const raw = JSON.stringify({ code, xuid });
+      assert.equal((await fetch(`${baseUrl}/bridge/character/link`, {
+        method: "POST", headers: signedHeaders(BDS_SECRET, raw), body: raw,
+      })).status, 200);
+    }
+
+    const charH = Number((await pool.query(
+      `SELECT id FROM characters WHERE persistent_id = 'p-H'`
+    )).rows[0].id);
+    const charI = Number((await pool.query(
+      `SELECT id FROM characters WHERE persistent_id = 'p-I'`
+    )).rows[0].id);
+
+    const cash = async (cid: number) => Number((await pool.query(
+      `SELECT balance_cents FROM wallets WHERE character_id = $1`, [cid]
+    )).rows[0]?.balance_cents ?? 0);
+    const keyCount = async (cid: number, vid: number) => Number((await pool.query(
+      `SELECT COALESCE(SUM(quantity), 0)::int FROM inventory_slots
+       WHERE character_id = $1 AND item_id = 'rp:vehicle_key' AND (item_metadata->>'vehicle_id')::bigint = $2`,
+      [cid, vid]
+    )).rows[0].coalesce);
+
+    // unlinked bridge playerId -> 404
+    assert.equal((await bridgePost("/bridge/vehicle/mine", { playerId: "p-nobody" })).status, 404);
+
+    // admin creates a vehicle for Henry (owner) — key issued into carry
+    const created = await (await postAs("/admin/vehicles", {
+      entityType: "megaverse:buggy", ownerCharacterId: charH, salePriceCents: null,
+    }, ctx.tokenA)).json();
+    assert.equal(created.vehicle?.id > 0, true);
+    const v1 = created.vehicle;
+    assert.equal(v1.ownerCharacterId, charH);
+    assert.equal(v1.status, "garaged");
+    assert.equal(v1.locked, true);
+    assert.equal(v1.entityType, "megaverse:buggy");
+    assert.match(v1.plate, /^RP-[A-Z2-9]{5}$/);
+    assert.equal(await keyCount(charH, v1.id), 1);
+
+    // non-owner without a key cannot touch the car (403 on state changes)
+    assert.equal((await bridgePost("/bridge/vehicle/lock", {
+      playerId: "p-I", vehicleId: v1.id, locked: false,
+    })).status, 403);
+    // a garaged car can't be stored even by its owner (409), and refuel is refused for non-owners
+    assert.equal((await bridgePost("/bridge/vehicle/store", {
+      playerId: "p-H", vehicleId: v1.id,
+    })).status, 409);
+    assert.equal((await bridgePost("/bridge/vehicle/refuel", {
+      playerId: "p-I", vehicleId: v1.id, units: 10, currency: "cash",
+    })).status, 403);
+
+    // mine (bridge) shows garage capacity + the new vehicle
+    const mine1 = await bridgeJson("/bridge/vehicle/mine", { playerId: "p-H" });
+    assert.equal(mine1.ok, true);
+    assert.equal(mine1.garageCapacity, 3);
+    assert.equal(mine1.vehicleCount, 1);
+    assert.ok(mine1.vehicles.some((v: any) => Number(v.id) === Number(v1.id)));
+
+    // player web endpoint mirrors the same read model
+    const webGarage = await (await getAs("/character/vehicles", tokenH)).json();
+    assert.equal(webGarage.garageCapacity, 3);
+    assert.ok(webGarage.vehicles.some((v: any) => Number(v.id) === Number(v1.id)));
+
+    // deploy -> deployed; deploy again -> 409
+    const deploy = await bridgeJson("/bridge/vehicle/deploy", { playerId: "p-H", vehicleId: v1.id });
+    assert.equal(deploy.ok, true);
+    assert.equal(deploy.vehicle.status, "deployed");
+    assert.equal((await bridgePost("/bridge/vehicle/deploy", { playerId: "p-H", vehicleId: v1.id })).status, 409);
+    // deployed but not owned + no key -> store refused (real access denial)
+    assert.equal((await bridgePost("/bridge/vehicle/store", {
+      playerId: "p-I", vehicleId: v1.id,
+    })).status, 403);
+
+    // lock toggle by owner
+    const unlock = await bridgeJson("/bridge/vehicle/lock", { playerId: "p-H", vehicleId: v1.id, locked: false });
+    assert.equal(unlock.vehicle.locked, false);
+    const relock = await bridgeJson("/bridge/vehicle/lock", { playerId: "p-H", vehicleId: v1.id, locked: true });
+    assert.equal(relock.vehicle.locked, true);
+
+    // refuel debits the wallet; units capped by tank space (50 units -> 500 cents)
+    await ctx.economy.credit({ characterId: charH, amountCents: 100000, reason: "test seed", actorUserId: h.id, currency: "cash" });
+    assert.equal(await cash(charH), 100000);
+    // burn half the tank first (120000 ticks = 50 units) so refuel has room
+    const burned = await bridgeJson("/bridge/vehicle/state", { vehicleId: v1.id, drivingTicks: 120000 });
+    assert.equal(burned.vehicle.fuelLevel, 50);
+    const refuel = await bridgeJson("/bridge/vehicle/refuel", { playerId: "p-H", vehicleId: v1.id, units: 50, currency: "cash" });
+    assert.equal(refuel.ok, true);
+    assert.equal(refuel.refilledUnits, 50);
+    assert.equal(refuel.costCents, 500);
+    assert.equal(await cash(charH), 99500);
+    assert.equal(refuel.vehicle.fuelLevel, 100);
+    // refuel over a full tank -> 409
+    assert.equal((await bridgePost("/bridge/vehicle/refuel", {
+      playerId: "p-H", vehicleId: v1.id, units: 10, currency: "cash",
+    })).status, 409);
+
+    // sensor state: driving 2400 ticks burns 1 unit; engine drops only via reports; body grows only via reports
+    const state1 = await bridgeJson("/bridge/vehicle/state", {
+      vehicleId: v1.id, drivingTicks: 2400, engineHealth: 90, suspensionHealth: 95, bodyDamage: 5,
+    });
+    assert.equal(state1.ok, true);
+    assert.equal(state1.vehicle.fuelLevel, 99);
+    assert.equal(state1.vehicle.engineHealth, 90);
+    assert.equal(state1.vehicle.suspensionHealth, 95);
+    assert.equal(state1.vehicle.bodyDamage, 5);
+    // a "healed" report cannot raise health (sensors never heal)
+    const state2 = await bridgeJson("/bridge/vehicle/state", {
+      vehicleId: v1.id, drivingTicks: 0, engineHealth: 100, bodyDamage: 3,
+    });
+    assert.equal(state2.vehicle.engineHealth, 90);
+    assert.equal(state2.vehicle.bodyDamage, 5);
+
+    // repair costs engine(10*3)+susp(5*2)+body(5*1)=45; health back to 100
+    const repair = await bridgeJson("/bridge/vehicle/repair", { playerId: "p-H", vehicleId: v1.id, currency: "cash" });
+    assert.equal(repair.ok, true);
+    assert.equal(repair.costCents, 45);
+    assert.equal(await cash(charH), 99500 - 45);
+    assert.equal(repair.vehicle.engineHealth, 100);
+    assert.equal(repair.vehicle.suspensionHealth, 100);
+    assert.equal(repair.vehicle.bodyDamage, 0);
+    // nothing to repair -> 409
+    assert.equal((await bridgePost("/bridge/vehicle/repair", { playerId: "p-H", vehicleId: v1.id })).status, 409);
+
+    // store back to garage
+    assert.equal((await bridgeJson("/bridge/vehicle/store", { playerId: "p-H", vehicleId: v1.id })).vehicle.status, "garaged");
+
+    // transfer to Iris while parked: key moves atomically
+    const transfer = await bridgeJson("/bridge/vehicle/transfer", { playerId: "p-H", vehicleId: v1.id, targetPersistentId: "p-I" });
+    assert.equal(transfer.ok, true);
+    assert.equal(transfer.vehicle.ownerCharacterId, charI);
+    assert.equal(await keyCount(charH, v1.id), 0);
+    assert.equal(await keyCount(charI, v1.id), 1);
+
+    // Iris lists it for sale; Ian (via bridge buy) buys it from the dealership pot
+    const sale = await bridgeJson("/bridge/vehicle/sell", { playerId: "p-I", vehicleId: v1.id, priceCents: 20000, currency: "cash" });
+    assert.equal(sale.ok, true);
+    assert.equal(sale.vehicle.salePriceCents, 20000);
+    const shopList = await bridgeJson("/bridge/vehicle/shop", {});
+    assert.ok(shopList.vehicles.some((v: any) => Number(v.id) === Number(v1.id)));
+
+    // buy: fresh owner J (real player-to-player transfer path via the money engine)
+    const j = await upsertUserByDiscordId("2103", "UserJ");
+    const tokenJ = await issueSessionToken(j.id);
+    assert.equal((await postAs("/character", { name: "Jack" }, tokenJ)).status, 201);
+    const codeJ = await (await postAs("/character/link-code", {}, tokenJ)).json();
+    const rawJ = JSON.stringify({ code: codeJ.code, xuid: "p-J" });
+    assert.equal((await fetch(`${baseUrl}/bridge/character/link`, {
+      method: "POST", headers: signedHeaders(BDS_SECRET, rawJ), body: rawJ,
+    })).status, 200);
+    const charJ = Number((await pool.query(
+      `SELECT id FROM characters WHERE persistent_id = 'p-J'`
+    )).rows[0].id);
+    await ctx.economy.credit({ characterId: charJ, amountCents: 100000, reason: "test seed", actorUserId: j.id, currency: "cash" });
+    // Jack can't afford it yet? he can. seller = Iris. money: Iris +20000, Jack -20000
+    const beforeI = await cash(charI);
+    const beforeJ = await cash(charJ);
+    const bought = await bridgeJson("/bridge/vehicle/buy", { playerId: "p-J", vehicleId: v1.id });
+    assert.equal(bought.ok, true);
+    assert.equal(bought.vehicle.ownerCharacterId, charJ);
+    assert.equal(await cash(charI), beforeI + 20000);
+    assert.equal(await cash(charJ), beforeJ - 20000);
+    assert.equal(await keyCount(charI, v1.id), 0);
+    assert.equal(await keyCount(charJ, v1.id), 1);
+
+    // admin create an unowned dealership car and have Jack buy it (debit path)
+    await ctx.economy.credit({ characterId: charJ, amountCents: 100000, reason: "test seed 2", actorUserId: j.id, currency: "cash" });
+    const shopCar = (await (await postAs("/admin/vehicles", {
+      entityType: "megaverse:buggy", ownerCharacterId: null, salePriceCents: 150000, saleCurrency: "cash",
+    }, ctx.tokenA)).json()).vehicle;
+    assert.equal(shopCar.ownerCharacterId, null);
+    const beforeJ2 = await cash(charJ);
+    const boughtShop = await bridgeJson("/bridge/vehicle/buy", { playerId: "p-J", vehicleId: shopCar.id });
+    assert.equal(boughtShop.ok, true);
+    assert.equal(boughtShop.vehicle.ownerCharacterId, charJ);
+    assert.equal(await cash(charJ), beforeJ2 - 150000);
+    assert.equal(await keyCount(charJ, shopCar.id), 1);
+
+    // admin: list with owner name, non-owner denied
+    const adminList = (await (await getAs("/admin/vehicles", ctx.tokenA)).json()).vehicles;
+    assert.ok(adminList.some((v: any) => Number(v.id) === Number(v1.id) && v.ownerName === "Jack"));
+    assert.equal((await getAs("/admin/vehicles", ctx.tokenB)).status, 403);
+
+    // admin maintenance overrides state
+    const maint = (await postAs(`/admin/vehicles/${v1.id}/maintenance`, { fuelLevel: 7, engineHealth: 33, locked: false }, ctx.tokenA)).status;
+    assert.equal(maint, 200);
+    const afterMaint = await vehicleModuleGet(v1.id);
+    assert.equal(afterMaint.fuelLevel, 7);
+    assert.equal(afterMaint.engineHealth, 33);
+    assert.equal(afterMaint.locked, false);
+
+    // seize blocks operations and shows up in admin list
+    assert.equal((await postAs(`/admin/vehicles/${v1.id}/seize`, {}, ctx.tokenA)).status, 200);
+    assert.equal((await postAs(`/admin/vehicles/${v1.id}/grant`, { ownerCharacterId: charH }, ctx.tokenA)).status, 409);
+    assert.equal((await bridgePost("/bridge/vehicle/deploy", { playerId: "p-J", vehicleId: v1.id })).status, 409);
+
+    // seized blocks everything, then admin deletes it (keys + trunk cleaned up)
+    assert.equal((await bridgePost("/bridge/vehicle/store", { playerId: "p-J", vehicleId: v1.id })).status, 409);
+    assert.equal((await delAs(`/admin/vehicles/${v1.id}`, ctx.tokenA)).status, 204);
+    assert.equal((await pool.query(`SELECT COUNT(*)::int AS n FROM vehicles WHERE id = $1`, [v1.id])).rows[0].n, 0);
+    assert.equal((await pool.query(`SELECT COUNT(*)::int AS n FROM inventory_slots WHERE item_id = 'rp:vehicle_key' AND (item_metadata->>'vehicle_id')::bigint = $1`, [v1.id])).rows[0].n, 0);
+    assert.equal((await pool.query(`SELECT COUNT(*)::int AS n FROM inventories WHERE id = $1`, [v1.trunkInventoryId])).rows[0].n, 0);
+
+    // reconcile returns stranded 'deployed' vehicles to the garage
+    const strandedPlate = (await pool.query(
+      `INSERT INTO vehicles (entity_type, plate, owner_character_id, status, trunk_inventory_id)
+       VALUES ('megaverse:buggy', 'RP-TEST99', $1, 'deployed', NULL) RETURNING id`,
+      [charJ]
+    )).rows[0].id;
+    const reconcile = await bridgeJson("/bridge/vehicle/reconcile", { deployedVehicleIds: [strandedPlate] });
+    assert.equal(reconcile.ok, true);
+    assert.equal(reconcile.resetToGarage, 0);
+    const stranded2Plate = (await pool.query(
+      `INSERT INTO vehicles (entity_type, plate, owner_character_id, status, trunk_inventory_id)
+       VALUES ('megaverse:buggy', 'RP-TEST98', $1, 'deployed', NULL) RETURNING id`,
+      [charJ]
+    )).rows[0].id;
+    const reconcile2 = await bridgeJson("/bridge/vehicle/reconcile", { deployedVehicleIds: [strandedPlate] });
+    assert.equal(reconcile2.resetToGarage, 1);
+    const strandedStatus = (await pool.query(`SELECT status FROM vehicles WHERE id = $1`, [stranded2Plate])).rows[0].status;
+    assert.equal(strandedStatus, "garaged");
+
+    // every mutation wrote an audit row (sample assertions)
+    const audits = (await pool.query(
+      `SELECT action, COUNT(*)::int AS n FROM audit_log WHERE target_type = 'vehicle' GROUP BY action`
+    )).rows;
+    const byAction = Object.fromEntries(audits.map((a: any) => [a.action, a.n]));
+    for (const action of [
+      "vehicle.create", "vehicle.deploy", "vehicle.store", "vehicle.lock", "vehicle.unlock",
+      "vehicle.refuel", "vehicle.repair", "vehicle.transfer", "vehicle.sell", "vehicle.buy",
+      "vehicle.seize", "vehicle.delete", "vehicle.maintenance", "vehicle.reconcile",
+    ]) {
+      assert.ok((byAction[action] ?? 0) >= 1, `expected audit rows for ${action}`);
+    }
+  });
+
   // cleanup
   await new Promise<void>((resolve) => ctx.server.close(() => resolve()));
   await pool.end();
   await ctx.redis.quit();
 });
+
+async function vehicleModuleGet(vehicleId: number): Promise<{ fuelLevel: number; engineHealth: number; locked: boolean }> {
+  const { getVehicle } = await import("../modules/vehicle/index.js");
+  const v = await getVehicle(vehicleId);
+  if (!v) throw new Error("vehicle not found");
+  return { fuelLevel: v.fuelLevel, engineHealth: v.engineHealth, locked: v.locked };
+}

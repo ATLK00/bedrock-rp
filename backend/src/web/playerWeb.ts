@@ -187,6 +187,7 @@ const APP_JS = `
     page.appendChild(el('<div id="wallet-card" class="card"><h2>กระเป๋าเงิน</h2><p class="muted">กำลังโหลด…</p></div>'));
     page.appendChild(el('<div id="carry-card" class="card"><h2>ของที่ถือ</h2><p class="muted">กำลังโหลด…</p></div>'));
     page.appendChild(el('<div id="container-card" class="card"><h2>ตู้เก็บของ</h2><p class="muted">กำลังโหลด…</p></div>'));
+    page.appendChild(el('<div id="garage-card" class="card"><h2>อู่ของคุณ</h2><p class="muted">กำลังโหลด…</p></div>'));
     setApp(page);
 
     // link-code area
@@ -216,16 +217,18 @@ const APP_JS = `
       });
     }
 
-    // wallet + carry + containers (parallel)
+    // wallet + carry + containers + garage (parallel)
     Promise.all([
       api("/character/wallet"),
       api("/character/inventory"),
       api("/inventories"),
+      api("/character/vehicles"),
     ]).then(function (results) {
-      var wallet = results[0], inv = results[1], containers = results[2];
+      var wallet = results[0], inv = results[1], containers = results[2], garage = results[3];
       renderWallet(page.querySelector("#wallet-card"), wallet);
       renderCarry(page.querySelector("#carry-card"), inv);
       renderContainers(page.querySelector("#container-card"), containers, page);
+      renderGarage(page.querySelector("#garage-card"), garage);
     });
   }
 
@@ -287,6 +290,23 @@ const APP_JS = `
             : '<div class="muted">ว่างเปล่า</div>');
       });
     });
+  }
+
+  function renderGarage(card, garage) {
+    if (!garage.ok) { card.innerHTML = '<h2>อู่ของคุณ</h2><p class="muted">' + esc((garage.data && garage.data.error) || "ไม่พร้อมใช้งาน") + '</p>'; return; }
+    var d = garage.data;
+    var rows = (d.vehicles || []).map(function (v) {
+      return "<tr><td><strong>" + esc(v.plate) + "</strong></td>" +
+        "<td>" + esc(v.entityType) + "</td>" +
+        "<td>" + esc(v.status) + (v.locked ? " · 🔒" : "") + "</td>" +
+        "<td>" + Number(v.fuelLevel).toFixed(0) + "%</td>" +
+        "<td>" + Number(v.bodyDamage).toFixed(0) + "</td>" +
+        "<td>" + (v.salePriceCents != null ? money(v.salePriceCents) + " " + esc(v.saleCurrency) : "—") + "</td></tr>";
+    }).join("");
+    card.innerHTML =
+      '<h2>อู่ของคุณ</h2><p class="muted">ที่จอด: ' + esc(String(d.vehicleCount)) + " / " + esc(String(d.garageCapacity)) + "</p>" +
+      (rows ? "<table><tr><th>ป้าย</th><th>ชนิด</th><th>สถานะ</th><th>น้ำมัน</th><th>ความเสียหาย</th><th>ราคาขาย</th></tr>" + rows + "</table>"
+        : '<p class="muted">ยังไม่มีรถ — ไปซื้อที่โชว์รูมในเกมได้เลย</p>');
   }
 
   async function boot() {

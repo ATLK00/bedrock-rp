@@ -12,6 +12,7 @@ import * as playerSession from "../player_session/index.js";
 import { cleanupOldSessions } from "../auth/index.js";
 import * as cases from "../cases/index.js";
 import * as security from "../security/index.js";
+import * as vehicleAdmin from "../vehicle/index.js";
 
 /**
  * Admin HTTP routes. Every route:
@@ -590,6 +591,156 @@ adminRouter.delete("/inventory/containers/:id", requirePermission("inventory.man
     if (err instanceof inventory.ContainerNotFoundError) return res.status(404).json({ error: err.message });
     if (err instanceof inventory.ContainerNotEmptyError) return res.status(409).json({ error: err.message });
     res.status(500).json({ error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Vehicles — create, grant, seize, delete, override state, list/details.
+// All routes delegate to the vehicle module (which audits every transition).
+// ---------------------------------------------------------------------------
+
+function vehicleAdminError(res: any, err: any) {
+  if (err instanceof vehicleAdmin.VehicleNotFoundError) return res.status(404).json({ error: err.message });
+  if (err instanceof vehicleAdmin.VehicleGarageFullError) return res.status(409).json({ error: err.message });
+  if (err instanceof vehicleAdmin.VehicleInUseError) return res.status(409).json({ error: err.message });
+  if (err instanceof inventory.InventoryFullError || err instanceof inventory.CarryWeightExceededError) {
+    return res.status(409).json({ error: "owner doesn't have room in their carry for the key item" });
+  }
+  return res.status(500).json({ error: err.message });
+}
+
+async function parseVehicleIdOr400(req: any, res: any): Promise<number | null> {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) {
+    res.status(400).json({ error: "vehicle id must be a positive integer" });
+    return null;
+  }
+  return id;
+}
+
+adminRouter.get("/vehicles", requirePermission("vehicle.view"), async (req, res) => {
+  try {
+    const limit = Number(req.query.limit ?? 50);
+    const offset = Number(req.query.offset ?? 0);
+    const status = typeof req.query.status === "string" ? req.query.status : undefined;
+    const forSale = req.query.forSale !== undefined;
+    const vehicles = await vehicleAdmin.listVehicles({
+      limit: Number.isFinite(limit) ? Math.max(1, Math.min(limit, 200)) : 50,
+      offset: Number.isFinite(offset) ? Math.max(0, offset) : 0,
+      status,
+      forSale,
+    });
+    res.json({ vehicles });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+adminRouter.get("/vehicles/:id", requirePermission("vehicle.view"), async (req, res) => {
+  const id = await parseVehicleIdOr400(req, res);
+  if (!id) return;
+  const vehicleRow = await vehicleAdmin.getVehicle(id);
+  if (!vehicleRow) return res.status(404).json({ error: "vehicle not found" });
+  const trunk = vehicleRow.trunkInventoryId != null ? await inventory.getContainerInventory(vehicleRow.trunkInventoryId) : null;
+  res.json({ vehicle: vehicleRow, trunk });
+});
+
+adminRouter.post("/vehicles", requirePermission("vehicle.manage"), async (req, res) => {
+  const { entityType, ownerCharacterId, salePriceCents, saleCurrency, locked } = req.body ?? {};
+  const ownerId = ownerCharacterId == null ? null : Number(ownerCharacterId);
+  if (ownerId !== null && (!Number.isInteger(ownerId) || ownerId <= 0)) {
+    return res.status(400).json({ error: "ownerCharacterId must be a positive integer or null" });
+  }
+  try {
+    const view = await vehicleAdmin.createVehicle({
+      entityType: typeof entityType === "string" ? entityType : undefined,
+      ownerCharacterId: ownerId,
+      salePriceCents: typeof salePriceCents === "number" ? salePriceCents : null,
+      saleCurrency: typeof saleCurrency === "string" ? saleCurrency : undefined,
+      locked: typeof locked === "boolean" ? locked : undefined,
+      actorUserId: req.userId!,
+      requestId: requestIdOf(req),
+    });
+    res.status(201).json({ vehicle: view });
+  } catch (err: any) {
+    vehicleAdminError(res, err);
+  }
+});
+
+adminRouter.post("/vehicles/:id/grant", requirePermission("vehicle.manage"), async (req, res) => {
+  const id = await parseVehicleIdOr400(req, res);
+  if (!id) return;
+  const ownerId = Number((req.body ?? {}).ownerCharacterId);
+  if (!Number.isInteger(ownerId) || ownerId <= 0) {
+    return res.status(400).json({ error: "ownerCharacterId (positive integer) is required" });
+  }
+  try {
+    const view = await vehicleAdmin.grantVehicle({ vehicleId: id, ownerCharacterId: ownerId, actorUserId: req.userId!, requestId: requestIdOf(req) });
+    res.json({ vehicle: view });
+  } catch (err: any) {
+    vehicleAdminError(res, err);
+  }
+});
+
+adminRouter.post("/vehicles/:id/seize", requirePermission("vehicle.manage"), async (req, res) => {
+  const id = await parseVehicleIdOr400(req, res);
+  if (!id) return;
+  try {
+    const view = await vehicleAdmin.seizeVehicle({ vehicleId: id, actorUserId: req.userId!, requestId: requestIdOf(req) });
+    res.json({ vehicle: view });
+  } catch (err: any) {
+    vehicleAdminError(res, err);
+  }
+});
+
+adminRouter.post("/vehicles/:id/repair", requirePermission("vehicle.manage"), async (req, res) => {
+  const id = await parseVehicleIdOr400(req, res);
+  if (!id) return;
+  try {
+    const view = await vehicleAdmin.overrideVehicleState({
+      vehicleId: id,
+      engineHealth: 100,
+      suspensionHealth: 100,
+      bodyDamage: 0,
+      fuelLevel: 100,
+      actorUserId: req.userId!,
+      requestId: requestIdOf(req),
+    });
+    res.json({ vehicle: view });
+  } catch (err: any) {
+    vehicleAdminError(res, err);
+  }
+});
+
+adminRouter.post("/vehicles/:id/maintenance", requirePermission("vehicle.manage"), async (req, res) => {
+  const id = await parseVehicleIdOr400(req, res);
+  if (!id) return;
+  const { fuelLevel, engineHealth, suspensionHealth, bodyDamage, locked } = req.body ?? {};
+  try {
+    const view = await vehicleAdmin.overrideVehicleState({
+      vehicleId: id,
+      fuelLevel: typeof fuelLevel === "number" ? fuelLevel : undefined,
+      engineHealth: typeof engineHealth === "number" ? engineHealth : undefined,
+      suspensionHealth: typeof suspensionHealth === "number" ? suspensionHealth : undefined,
+      bodyDamage: typeof bodyDamage === "number" ? bodyDamage : undefined,
+      locked: typeof locked === "boolean" ? locked : undefined,
+      actorUserId: req.userId!,
+      requestId: requestIdOf(req),
+    });
+    res.json({ vehicle: view });
+  } catch (err: any) {
+    vehicleAdminError(res, err);
+  }
+});
+
+adminRouter.delete("/vehicles/:id", requirePermission("vehicle.manage"), async (req, res) => {
+  const id = await parseVehicleIdOr400(req, res);
+  if (!id) return;
+  try {
+    await vehicleAdmin.deleteVehicle({ vehicleId: id, actorUserId: req.userId!, requestId: requestIdOf(req) });
+    res.status(204).end();
+  } catch (err: any) {
+    vehicleAdminError(res, err);
   }
 });
 

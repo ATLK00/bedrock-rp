@@ -1,0 +1,25 @@
+{
+  "format_version": "1.21.0",
+  "minecraft:client_entity": {
+    "description": {
+      "identifier": "megaverse:buggy",
+      "materials": { "default": "entity_alphatest" },
+      "textures": { "default": "textures/entity/buggy" },
+      "geometry": { "default": "geometry.buggy_car" },
+      "animations": {
+        "driving_controller": "controller.animation.car.driving",
+        "moving": "animation.car.moving"
+      },
+      "scripts": {
+        "pre_animation": [
+          "v.wheel_rotation = q.property('megaverse:wheels_rotation');",
+          "v.steering_angle = q.property('megaverse:steering_angle');",
+          "v.body_pitch = q.property('megaverse:body_pitch');",
+          "v.body_roll = q.property('megaverse:body_roll');"
+        ],
+        "animate": [ "driving_controller" ]
+      },
+      "render_controllers": [ "controller.render.default" ]
+    }
+  }
+}

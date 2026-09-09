@@ -8,3 +8,5 @@ ops/backups/
 # ad-hoc curl test payloads (throwaway, not fixtures)
 *_body.json
 grant_*.json
+# vendor addon sources shipped as zip (unpacked, working copies live in vehicle_pack/)
+*.zip

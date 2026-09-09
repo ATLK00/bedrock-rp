@@ -1,0 +1,78 @@
+{
+  "format_version": "1.21.0",
+  "minecraft:entity": {
+    "description": {
+      "identifier": "megaverse:buggy",
+      "is_spawnable": false,
+      "is_summonable": true,
+      "properties": {
+        "megaverse:wheels_rotation": { "type": "float", "range": [-360.0, 360.0], "client_sync": true, "default": 0.0 },
+        "megaverse:steering_angle": { "type": "float", "range": [-80.0, 80.0], "client_sync": true, "default": 0.0 },
+        "megaverse:movement_velocity": { "type": "float", "range": [-100.0, 100.0], "client_sync": true, "default": 0.0 },
+        "megaverse:body_pitch": { "type": "float", "range": [-360.0, 360.0], "client_sync": true, "default": 0.0 },
+        "megaverse:body_roll": { "type": "float", "range": [-360.0, 360.0], "client_sync": true, "default": 0.0 },
+        "megaverse:body_height": { "type": "float", "range": [-2.0, 2.0], "client_sync": true, "default": 0.0 },
+        "megaverse:gear": { "type": "int", "range": [-1, 5], "client_sync": true, "default": 0 },
+        "megaverse:rpm": { "type": "float", "range": [0.0, 8000.0], "client_sync": true, "default": 800.0 },
+        "megaverse:speed_kmh": { "type": "float", "range": [0.0, 1500.0], "client_sync": true, "default": 0.0 },
+        "megaverse:fuel": { "type": "float", "range": [0.0, 100.0], "client_sync": true, "default": 100.0 },
+        "megaverse:is_engine_on": { "type": "bool", "client_sync": true, "default": false },
+        "megaverse:burst_fl": { "type": "bool", "client_sync": true, "default": false },
+        "megaverse:burst_fr": { "type": "bool", "client_sync": true, "default": false },
+        "megaverse:burst_rl": { "type": "bool", "client_sync": true, "default": false },
+        "megaverse:burst_rr": { "type": "bool", "client_sync": true, "default": false },
+
+        "megaverse:engine_health": { "type": "float", "range": [0.0, 100.0], "client_sync": true, "default": 100.0 },
+        "megaverse:suspension_health": { "type": "float", "range": [0.0, 100.0], "client_sync": true, "default": 100.0 },
+        "megaverse:body_damage": { "type": "float", "range": [0.0, 100.0], "client_sync": true, "default": 0.0 }
+      }
+    },
+    
+    "component_groups": {
+      "megaverse:despawn": {
+        "minecraft:instant_despawn": {}
+      }
+    },
+    
+    "events": {
+      "megaverse:destroy_car": {
+        "add": { "component_groups": [ "megaverse:despawn" ] }
+      }
+    },
+    
+    "components": {
+      "minecraft:physics": { "has_gravity": true, "has_collision": true },
+      "minecraft:collision_box": { "width": 1.2, "height": 1.4 },
+      "minecraft:pushable": { "is_pushable": false, "is_pushable_by_piston": true },
+
+      "minecraft:renders_when_invisible": {},
+      "minecraft:spell_effects": {
+        "add_effects": [
+          { "effect": "invisibility", "duration": "infinite", "visible": false }
+        ]
+      },
+
+      "minecraft:damage_sensor": {
+        "triggers": {
+          "cause": "all",
+          "deals_damage": false
+        }
+      },
+      
+      "minecraft:rideable": {
+        "seat_count": 1,
+        "family_types": ["player"],
+        "interact_text": "action.interact.drive",
+        "controlling_seat": 0, 
+        "seats": [ { "position": [0.0, 0.25, -0.3] } ]
+      },
+      
+      "minecraft:navigation.fly": { "can_path_over_water": true },
+      "minecraft:movement.fly": {},
+      
+      "minecraft:can_power_jump": {},
+      "minecraft:horse.jump_strength": { "value": 0.0 },
+      "minecraft:rotation_locked_to_vehicle": {} 
+    }
+  }
+}

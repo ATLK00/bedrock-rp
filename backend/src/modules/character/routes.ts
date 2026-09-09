@@ -18,6 +18,7 @@ import {
 } from "./index.js";
 import { getInventory } from "../inventory/index.js";
 import { getWalletAndHistory } from "../economy/index.js";
+import { getGarageSummary as getVehicleGarage } from "../vehicle/index.js";
 import { createCase } from "../cases/index.js";
 
 export const characterRouter = Router();
@@ -218,4 +219,19 @@ characterRouter.get("/wallet", async (req, res) => {
 
   const wallet = await getWalletAndHistory(rows[0].id);
   res.json({ characterId: rows[0].id, ...wallet });
+});
+
+/** GET /character/vehicles — own character's garage summary (read-only for the player web). */
+characterRouter.get("/vehicles", async (req, res) => {
+  const userId = requireUserId(req, res);
+  if (userId === null) return;
+
+  const { rows } = await pool.query(
+    `SELECT id FROM characters WHERE user_id = $1 AND is_deleted = false`,
+    [userId]
+  );
+  if (rows.length === 0) return res.status(404).json({ error: "no character found for this user" });
+
+  const summary = await getVehicleGarage(rows[0].id);
+  res.json({ characterId: rows[0].id, ...summary });
 });

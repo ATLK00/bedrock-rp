@@ -110,9 +110,9 @@ const APP_JS = `
     return;
   }
 
-  var TABS = ["overview", "users", "characters", "shop", "cases", "audit", "security", "roles"];
+  var TABS = ["overview", "users", "characters", "shop", "cases", "audit", "security", "roles", "vehicles"];
   var LABELS = { overview: "ภาพรวม", users: "ผู้เล่น", characters: "ตัวละคร",
-    shop: "ร้านค้า", cases: "เคส", audit: "Audit", security: "Security", roles: "Roles" };
+    shop: "ร้านค้า", cases: "เคส", audit: "Audit", security: "Security", roles: "Roles", vehicles: "รถยนต์" };
 
   function el(html) {
     var d = document.createElement("div");
@@ -178,7 +178,7 @@ const APP_JS = `
     var renderers = {
       overview: renderOverview, users: renderUsers, characters: renderCharacters,
       shop: renderShop, cases: renderCases, audit: renderAudit,
-      security: renderSecurity, roles: renderRoles,
+      security: renderSecurity, roles: renderRoles, vehicles: renderVehicles,
     };
     renderers[name](page);
   }
@@ -673,6 +673,93 @@ const APP_JS = `
     }
     mgr.querySelector("#r-grant").addEventListener("click", function () { roleCall("/admin/roles/grant"); });
     mgr.querySelector("#r-revoke").addEventListener("click", function () { roleCall("/admin/roles/revoke"); });
+  }
+
+  // ------------------------------------------------ vehicles
+  function renderVehicles(page) {
+    page.innerHTML = "";
+    page.appendChild(el(
+      "<div class=\\"card\\"><h2>สร้างรถ</h2>" +
+      "<div class=\\"row\\"><input id=\\"v-type\\" placeholder=\\"entityType (megaverse:buggy)\\">" +
+      "<input id=\\"v-owner\\" type=\\"number\\" placeholder=\\"ownerCharacterId (ว่าง = ยังไม่มีคนซื้อ)\\">" +
+      "<input id=\\"v-price\\" type=\\"number\\" placeholder=\\"priceCents (ว่าง = ไม่ขาย)\\">" +
+      "<button id=\\"v-create\\" class=\\"btn primary\\">สร้าง</button>" +
+      "<span id=\\"v-create-msg\\" class=\\"muted\\"></span></div></div>"
+    ));
+    page.appendChild(el(
+      "<div class=\\"card\\"><h2>รถทั้งหมด</h2>" +
+      "<div class=\\"row\\"><button id=\\"v-refresh\\" class=\\"btn\\">Refresh</button><span id=\\"v-msg\\" class=\\"muted\\"></span></div>" +
+      "<div id=\\"vlist\\"><p class=\\"muted\\">กำลังโหลด…</p></div></div>"
+    ));
+
+    function loadList() {
+      api("/admin/vehicles?limit=100").then(function (r) {
+        var out = page.querySelector("#vlist");
+        if (!r.ok) { out.innerHTML = errBox((r.data && r.data.error) || "failed"); return; }
+        var rows = (r.data && r.data.vehicles || []).map(function (v) {
+          return "<tr><td><strong>" + esc(v.plate) + "</strong></td>" +
+            "<td>" + esc(v.entityType) + "</td>" +
+            "<td>" + esc(v.ownerName || (v.ownerCharacterId ? "#" + v.ownerCharacterId : "—")) + "</td>" +
+            "<td>" + esc(v.status) + "</td>" +
+            "<td>" + esc(v.locked ? "ล็อก" : "ปลด") + "</td>" +
+            "<td>" + Number(v.fuelLevel).toFixed(0) + "</td>" +
+            "<td>" + Number(v.engineHealth).toFixed(0) + "/" + Number(v.suspensionHealth).toFixed(0) + " hp</td>" +
+            "<td>" + Number(v.bodyDamage).toFixed(0) + "</td>" +
+            "<td>" + (v.salePriceCents != null ? money(v.salePriceCents) + " " + esc(v.saleCurrency) : "—") + "</td>" +
+            "<td>" +
+            "<button class=\\"btn small\\" data-vgrant=\\"" + v.id + "\\">ให้รถ</button> " +
+            "<button class=\\"btn small\\" data-vrepair=\\"" + v.id + "\\">ซ่อม</button> " +
+            "<button class=\\"btn small danger\\" data-vseize=\\"" + v.id + "\\">ยึด</button> " +
+            "<button class=\\"btn small danger\\" data-vdel=\\"" + v.id + "\\">ลบ</button>" +
+            "</td></tr>";
+        }).join("");
+        out.innerHTML = rows
+          ? "<table><tr><th>ป้าย</th><th>ชนิด</th><th>เจ้าของ</th><th>สถานะ</th><th>ล็อก</th><th>น้ำมัน</th><th>ความเสียหาย</th><th>ตัวถัง</th><th>ราคาขาย</th><th>จัดการ</th></tr>" + rows + "</table>"
+          : "<p class=\\"muted\\">ยังไม่มีรถในระบบ</p>";
+      });
+    }
+    page.querySelector("#v-refresh").addEventListener("click", loadList);
+
+    page.querySelector("#v-create").addEventListener("click", function () {
+      var body = {
+        entityType: page.querySelector("#v-type").value.trim() || "megaverse:buggy",
+      };
+      var owner = Number(page.querySelector("#v-owner").value);
+      var price = page.querySelector("#v-price").value;
+      if (page.querySelector("#v-owner").value.trim() !== "") body.ownerCharacterId = owner;
+      if (price.trim() !== "") { body.salePriceCents = Number(price); body.saleCurrency = "cash"; }
+      postJSON("/admin/vehicles", body).then(function (r) {
+        var msg = page.querySelector("#v-create-msg");
+        if (!r.ok) { msg.textContent = (r.data && r.data.error) || "fail"; return; }
+        msg.textContent = "สร้างแล้ว " + ((r.data && r.data.vehicle && r.data.vehicle.plate) || "");
+        page.querySelector("#v-refresh").click();
+      });
+    });
+
+    page.addEventListener("click", function (e) {
+      var t = e.target;
+      var id = t.getAttribute && (t.getAttribute("data-vgrant") || t.getAttribute("data-vrepair") || t.getAttribute("data-vseize") || t.getAttribute("data-vdel"));
+      if (!id) return;
+      function act(method, endpoint, body) {
+        postJSON(endpoint, body || {}).then(function (r) {
+          toast(r.ok ? "ok" : ((r.data && r.data.error) || "fail"));
+          loadList();
+        });
+      }
+      if (t.getAttribute("data-vgrant")) {
+        var owner = prompt("ownerCharacterId?");
+        if (!owner) return;
+        act("POST", "/admin/vehicles/" + id + "/grant", { ownerCharacterId: Number(owner) });
+      } else if (t.getAttribute("data-vrepair")) {
+        act("POST", "/admin/vehicles/" + id + "/repair", {});
+      } else if (t.getAttribute("data-vseize")) {
+        act("POST", "/admin/vehicles/" + id + "/seize", {});
+      } else if (t.getAttribute("data-vdel")) {
+        if (!confirm("ลบรถคันนี้จริง ๆ เหรอ? (รวมของในท้ายรถ)")) return;
+        act("DELETE", "/admin/vehicles/" + id, {});
+      }
+    });
+    loadList();
   }
 
   // ------------------------------------------------ boot
