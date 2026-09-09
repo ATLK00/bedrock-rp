@@ -50,6 +50,134 @@
 ...
 
 ---
+## [2026-09-10 00:37] — AI: big-pickle (opencode) — Police / MDT system (licenses, fines, warrants, reports, arrest-jail-release)
+
+### Task
+Roadmap item 3: player-operated police MDT per MASTER_PROMPT §16 — citizen +
+vehicle records, licenses, fines (money sink), warrants, reports + evidence,
+arrest → jail (server-authoritative), threat-level records, ordered by police
+rank with full RBAC + audit. (User designs: fines decrease circulation;
+arrest/jail = server-authoritative with a documented intrusion limit.)
+
+### Changed
+- `backend/migrations/027_police.sql` (new) — `licenses` (one valid per
+  character+type; partial unique index excludes revoked; driving/weapon/
+  business/fishing/aviation), `police_records` (PK character, known_alias,
+  threat_level LOW/MEDIUM/HIGH/CRITICAL/REQUIRES_ARREST, notes), `police_reports`
+  (title/body/status open|closed, classification restricted/classified/
+  read_only/correspondence), `fines` (amount_cents, currency, reason, status
+  outstanding|paid), `warrants` (arrest|search, active|revoked, expires_at,
+  unique-open arrest warrant), `evidence`, `arrests` (active|released,
+  jailed_until, partial-unique active). Permissions: `police.view`,
+  `police.manage`, `police.admin`; seeded on the rank-5 `police` role.
+- `backend/src/modules/police/index.ts` (new) — MDT reads (getMineState,
+  getCitizenMdt, lookupVehicle, list*), writes (upsertRecord, setLicense,
+  issueFine/payFine, createReport/closeReport/addEvidence, issueWarrant/
+  revokeWarrant, arrestCharacter/releaseArrest, getFine for admin
+  pay-on-behalf). `payFine` calls `economy.fine()` = verified money sink
+  (debit, refType 'fine', refId 'fine:<id>', ledgered + audited); fine rows
+  locked `FOR UPDATE` so concurrent double-pay cannot overspend. Arrest
+  auto-executes an open `arrest` warrant; ranks: issue=police.manage,
+  warrant revoke + early release = police.admin, reads = police.view. Every
+  action audited (`police.record`, `police.license.<action>`,
+  `police.fine.issue/pay`, `police.warrant.issue/revoke`,
+  `police.report.create/close`, `police.evidence.add`,
+  `police.arrest.issue/release`). Jail 1–1440 min.
+- `backend/src/modules/bridge/index.ts` — `authorizePoliceActor` (RBAC
+  re-check + HIGH `staff_command_forbidden` event on deny), `policeCall`
+  error mapper (404/403/409 incl. economy errors), parses; 15 routes
+  `/bridge/police/{me,roles,lookup/character,lookup/vehicle,license,fine,
+  fine/pay,report,report/close,evidence,warrant,warrant/revoke,arrest,
+  release,record}`.
+- `backend/src/modules/admin/index.ts` — `policeAdminError` + 17 routes
+  `/admin/police/{citizens,citizens/:id,vehicles,licenses,fines,
+  fines/:id/pay,warrants,warrants/:id/revoke,reports,reports/:id/close,
+  arrests,release,records}` with permission gating.
+- `backend/src/modules/character/routes.ts` — `GET /character/police`,
+  `POST /character/fines/:id/pay` (404/403/409 mapped).
+- `backend/src/web/adminWeb.ts` — new "ตำรวจ" tab: `renderPolice` (citizen
+  search + fines/warrants/arrests/reports lists) + `policeCitizenDialog`
+  (license/fine/warrant/arrest/release/record actions) + `statTag`.
+- `backend/src/web/playerWeb.ts` — "ตำรวจ" card (license status, fines with
+  pay button via `/character/fines/:id/pay`, warrants, arrest status).
+- `behavior_pack/scripts/police_ui.js` (new) — `!police`/`!mdt`: officer
+  root (citizen lookup → citizen hub with license/fine/warrant/arrest/
+  release/record; vehicle lookup; reports), citizen root (inline fine pay).
+  Jail respawn enforcement: on every `playerSpawn`, a jailed character with
+  `jailed_until` in the future is teleported to `PRISON_SPAWN`
+  (⚠ placeholder `{x:0,y:80,z:0}` overworld — change to the server's real
+  prison). Wired into `behavior_pack/scripts/main.js` (chat trigger + new
+  every-spawn subscription).
+- `backend/src/test/integration.test.ts` — `grantRoleByName` helper + fresh
+  "police: MDT lookup / license / fine money-sink / warrant / report+evidence
+  / arrest-jail-release / audit" subtest.
+
+### Why
+Police authority must live server-side: the pack proposes actions, the backend
+decides (RBAC on the actor's identity + audit on every write). Fines debited
+with no counterparty = a real money sink (user decision). Arrest/jail is
+server-authoritative (jail_until on the arrest row); v1 joins enforcement only
+on spawn — a jailed player can keep playing in the world between checks
+(documented limitation, see migration header).
+
+### Dependencies / Impact
+- Migration 027 applies on next `npm run migrate` / test bootstrap.
+- `behavior_pack/scripts/police_ui.js` + updated `main.js` must be copied to
+  the BDS side (`~/bds/behavior_packs/bedrock-rp-core/scripts/`) + restart.
+- New role: give field officers the `police` role (rank 5) for
+  police.view/manage; police.admin (needed for warrant revoke + early
+  release) is owner/admin (or a senior-role grant).
+- `PRISON_SPAWN` in `police_ui.js` is a placeholder; update before relying on
+  jail respawn in the real world.
+
+### Tests
+- [PASS] suite **27/27** on the docker stack (fresh `bedrock_rp_test` DB,
+  migrations 001–027). New police subtest: non-police 403 + HIGH
+  `staff_command_forbidden` (payload `command=police.lookup.character`);
+  unlinked actor 404; citizen + vehicle MDT lookup; license issue /
+  duplicate-409 / suspend / revoke; fine issue (no money moves) → citizen
+  pays 150000→100000 cash (money sink) → granted-ledge ref row → double-pay
+  409 → cross-pay 403 → web `/character/fines/:id/pay` 200; warrant issue,
+  `police.manage` revoke 403, admin revoke, citizen sees no active warrant;
+  report + evidence + close; arrest active / re-arrest 409 / release; record
+  knownAlias+threatLevel; admin surfaces (citizens query, paid fines,
+  revoked warrants, closed reports, released arrests; 403 for non-police
+  token, admin-only release refused for officer token); audit rows for all
+  police.* actions.
+- [PASS] `npm run build` clean; `node --check` clean on `police_ui.js` and
+  the updated `main.js`.
+- Fixed while wiring the suite: `listCitizens` SQL was missing the `WHERE`
+  keyword (42601); test `ledgerRef` helper queried a nonexistent
+  `wallet_transactions` table (real ledger = `transactions`); record view key
+  is `knownAlias` (not `alias`); police.license audits as `police.license.*`
+  (not `police.license`); audit assertion query omitted `target_type
+  'license'`; admin paid-fines count is 2 not 3.
+
+### Security
+Pack never authorizes (bridge actor's role checked server-side, denied
+attempts = HIGH security event); reads gated by `police.view`; writes by
+`police.manage`; warrant revoke + early release are `police.admin`; owner
+bypass unchanged; every mutation audited with actor + requestId; fine payment
+is row-locked (no double spend) and lambda-debited (no account to forge).
+
+### Known Issues
+- Jail v1 enforces only at spawn/join (documented in 027 header) — a player
+  who was already in the world keeps playing until the next spawn/rejoin.
+- One active license per (character, type) enforced by a partial unique index;
+  suspension keeps the same row (status suspended).
+- `PRISON_SPAWN`/`PRISON_DIMENSION_ID` hardcoded placeholders in the pack.
+- Live `!police`/`!mdt` flow not yet exercised on a real BDS client (routes
+  are suite-covered).
+
+### Next Steps
+- Live-test `!police` on BDS: grant Officer + target roles/characters, copy
+  pack scripts, verify lookup/fine/warrant/arrest in-world; set the real
+  `PRISON_SPAWN`. Then roadmap item 4 (EMS) → Phone.
+
+### Handoff Notes
+- See AI_HANDOFF Round 10.
+
+---
 ## [2026-09-09 21:10] — AI: big-pickle (opencode) — Vehicle system (auto dealership → owned cars)
 
 ### Task

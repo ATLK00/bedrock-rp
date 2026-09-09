@@ -7,6 +7,58 @@
   real infrastructure; a small set of infrastructure-dependent paths remains
   explicitly unverified (listed below under **Unverified**).
 
+## 2026-09-10 Round 10 — Police / MDT (licenses, fines, warrants, reports, arrest-jail)
+
+- New police domain module `backend/src/modules/police/index.ts` (new) +
+  migration `027_police.sql`: `licenses` (driving/weapon/business/fishing/
+  aviation, one valid per character+type via partial unique index),
+  `police_records` (alias + threat level + notes, one row per citizen),
+  `police_reports` (classification, open/closed), `fines` (outstanding/paid:
+  the money sink), `warrants` (arrest/search, active/revoked, one open arrest
+  warrant per citizen), `evidence` (attached to reports), `arrests`
+  (active/released, `jailed_until`, one active per citizen). Permissions
+  `police.view/manage/admin`, seeded on the rank-5 `police` role.
+- MDT reads: `getMineState` (a citizen's own licenses/fines/warrants/arrest +
+  their record), `getCitizenMdt` (officer lookup incl. record + license/fine/
+  warrant/arrest counters), `lookupVehicle` (owner + license/citation counts),
+  `list*` with status filters. Writes: `upsertRecord`, `setLicense` (issue/
+  suspend/revoke), `issueFine`/`payFine`/`getFine`, `createReport`/
+  `closeReport`/`addEvidence`, `issueWarrant`/`revokeWarrant`,
+  `arrestCharacter`/`releaseArrest`. `economy.fine()` (verified existing, line
+  288) = debit with refType `fine` / refId `fine:<id>` — paying a fine removes
+  money from circulation (user decision). Fines locked `FOR UPDATE` on pay so
+  a concurrent double-pay blocks then 409s. Arrest auto-executes an open
+  `arrest` warrant; jail 1–1440 min.
+- Bridge shared-HMAC: `authorizePoliceActor` (persistentId → character →
+  Discord user → `hasPermission(police.view/…)`; deny = HIGH
+  `staff_command_forbidden` event with command payload), `parsePoliceId`,
+  `parsePlates`, `policeCall` error mapper (404 {Citizen/Vehicle/License/
+  Fine/Report/Warrant/Arrest}NotFound + 403 {AccessDenied, NotActive} + 409
+  {Exists, AlreadyPaid, InsufficientFunds}), `parsePoliceBodyLogin` (actor
+  name/persistentId required); 15 routes `/bridge/police/{me,roles,
+  lookup/character,lookup/vehicle,license,fine,fine/pay,report,report/close,
+  evidence,warrant,warrant/revoke,arrest,release,record}`.
+- Admin: 17 `/admin/police/*` routes under `policeAdminError` + parse helpers
+  (reads `police.view`, writes `police.manage`, warrant revoke + release
+  `police.admin`). admin can issue fines/pay on behalf (`getFine`).
+- Character/player web: `GET /character/police`, `POST
+  /character/fines/:id/pay`; playerWeb "ตำรวจ" card w/ inline fine pay;
+  adminWeb "ตำรวจ" tab (`renderPolice` + `policeCitizenDialog` + `statTag`).
+- Pack `behavior_pack/scripts/police_ui.js` (new, `!police`/`!mdt`): officer
+  root → citizen hub (license/fine/warrant/arrest/release/record) + vehicle
+  lookup + reports; citizen root with inline fine pay. Jail enforcement:
+  every `playerSpawn`, if `jailed_until` is in the future → teleport to
+  `PRISON_SPAWN` (`{x:0,y:80,z:0}` overworld — **placeholder, change it**).
+  Wired into `main.js` (chat trigger cancels the event; dedicated every-spawn
+  subscription for jail, distinct from the initial-spawn-only link check).
+- Integration test 27 "police: …" (fresh Officer/Nate; grantRoleByName for
+  the police role; 403 + security-event assert, 404 unlinked, citizen+vehicle
+  lookup, license dup-409, fine money sink 150000→100000 + ledger ref,
+  double-pay 409, cross-pay 403, web pay, warrant + manage-revoke 403 +
+  admin revoke, report+evidence+close, arrest/409/release, record, admin
+  surfaces + 403 gating, admin arrest/release, all police.* audit actions).
+  Suite **27/27** green.
+
 ## 2026-09-09 Round 9 — Housing system (property → storage + access + garage)
 
 - New real-estate domain as its own module `backend/src/modules/property/`
@@ -476,16 +528,18 @@ patch automation (`tools/leveldat_patch.py`), deploy/backup tooling
 `@minecraft/server-chat` finding), the player web panel
 (`GET /player` ..., 22-test suite), the **admin web panel** (`GET /admin`,
 23-test suite, MASTER_PROMPT §22), the **vehicle system** (Round 8,
-25-test suite), and the **housing system** (Round 9 — property module,
-garage-integrated storage/access, `!house` UI, 26-test suite) are all done.
-Remaining verified-gaps: real-browser passes of `/admin`, `/player` and the
-new vehicle + property admin tabs (open `http://<host>:8080/` in a browser —
-all serve valid now, incl. a local `node --check` syntax pass on the served
-JS); **live vehicle verification** — deploy/ride/sync/refuel/repair/sell on a
-real BDS client with the `vehicle_pack/` RP installed (upload it to MCY/World
-for players, install `behavior_pack/scripts/vehicle_ui.js` on the BDS side);
-**live property verification** — `!house` buy/lock/storage/transfer on a real
-client (stem `behavior_pack/scripts/property_ui.js` — not yet copied to BDS);
+25-test suite), the **housing system** (Round 9 — property module,
+garage-integrated storage/access, `!house` UI, 26-test suite), and the
+**police/MDT system** (Round 10 — licenses/fines/warrants/reports/
+arrest-jail, `!police`/`!mdt` UI, 27-test suite) are all done.
+Remaining verified-gaps: **live *police* verification** — grant a player the
+`police` role, copy `behavior_pack/scripts/police_ui.js` + the updated
+`main.js` to the BDS side, restart, then exercise the MDT in-world (lookup/
+license/fine/warrant/arrest) and set the real `PRISON_SPAWN` (currently the
+placeholder `{x:0,y:80,z:0}` overworld) before relying on jail respawn; live
+vehicle + property verification on a real BDS client with the `vehicle_pack/`
+RP installed (vehicle_ui.js / property_ui.js not yet all copied to BDS);
+real-browser passes of `/admin`, `/player` and the new police admin tab;
 live Discord OAuth was user-confirmed (2026-09-09) but not independently
 observed; the "heartbeat-after-leave drops presence" drop is HTTP-suite
 covered and can be observed live with a documented curl check; the compass

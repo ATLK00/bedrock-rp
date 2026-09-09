@@ -5,6 +5,7 @@ import * as inventory from "../inventory/index.js";
 import * as economy from "../economy/index.js";
 import * as vehicle from "../vehicle/index.js";
 import * as property from "../property/index.js";
+import * as police from "../police/index.js";
 import { hasPermission } from "../../rbac/index.js";
 import { emitSecurityEvent } from "../security/index.js";
 
@@ -904,4 +905,431 @@ bridgeRouter.post("/vehicle/reconcile", async (req, res) => {
   });
   logBridge("vehicle.reconcile", req, Date.now(), 200);
   res.json({ ok: true, resetToGarage });
+});
+
+// ---------------------------------------------------------------------------
+// Police (called by behavior_pack/scripts/police_ui.js — `!police`/`!mdt`).
+// Authority model mirrors !give: the pack forwards the officer's own
+// persistentId and RBAC is re-checked server-side (police.view / manage /
+// admin). The pack is never trusted — a player without the permission is
+// refused here and the attempt is raised as a HIGH security event.
+// Citizen-pays routes (fine/pay, me) use the caller's own identity instead.
+// ---------------------------------------------------------------------------
+
+function parsePoliceId(v: unknown): number | null {
+  const n = typeof v === "number" ? v : typeof v === "string" && v.trim() !== "" ? Number(v) : Number.NaN;
+  return Number.isInteger(n) && n > 0 ? n : null;
+}
+
+function parsePlates(v: unknown): string | null {
+  if (!isNonEmptyString(v)) return null;
+  const p = String(v).trim().toUpperCase();
+  return p.length >= 1 && p.length <= 16 ? p : null;
+}
+
+async function policeCall(req: any, res: any, action: string, fn: () => Promise<object>): Promise<void> {
+  const startedAt = Date.now();
+  try {
+    const result = await fn();
+    logBridge(action, req, startedAt, 200);
+    res.json({ ok: true, ...result });
+  } catch (err: any) {
+    let status = 500;
+    if (
+      err instanceof police.CitizenNotFoundError ||
+      err instanceof police.VehicleNotFoundError ||
+      err instanceof police.LicenseNotFoundError ||
+      err instanceof police.FineNotFoundError ||
+      err instanceof police.ReportNotFoundError ||
+      err instanceof police.WarrantNotFoundError ||
+      err instanceof police.ArrestNotFoundError
+    ) {
+      status = 404;
+    } else if (err instanceof police.FineAccessDeniedError) {
+      status = 403;
+    } else if (
+      err instanceof police.LicenseExistsError ||
+      err instanceof police.FineAlreadyPaidError ||
+      err instanceof police.WarrantNotActiveError ||
+      err instanceof police.CharacterAlreadyInJailError ||
+      err instanceof police.ArrestNotActiveError ||
+      err instanceof economy.InsufficientFundsError
+    ) {
+      status = 409;
+    }
+    logBridge(action, req, startedAt, status);
+    res.status(status).json({ ok: false, message: err && err.message ? err.message : "Something went wrong. Try again." });
+  }
+}
+
+/**
+ * Officer gate for police verbs: the actor's character is resolved from their
+ * own persistentId and a specific permission re-checked server-side. On any
+ * refusal a HIGH staff_command_forbidden security event is recorded and the
+ * HTTP response sent — the caller can tell because it returns null.
+ */
+async function authorizePoliceActor(params: {
+  req: any;
+  res: any;
+  permission: string;
+  command: string;
+  actorName: string | null;
+  actorPersistentId: string | null;
+  extra?: Record<string, unknown>;
+}): Promise<{ actorCharacterId: number; actorUserId: number; actorName: string } | null> {
+  const { req, res, permission, command, actorName, actorPersistentId, extra } = params;
+  const startedAt = Date.now();
+  const logAction = `police.${command}`;
+
+  const actorCharacter = actorPersistentId ? await findCharacterByPersistentId(actorPersistentId) : null;
+  if (!actorCharacter || !actorPersistentId) {
+    logBridge(logAction, req, startedAt, 404);
+    res.status(404).json({ ok: false, message: "Your Minecraft account isn't linked to a character — log in to the site and link it before using police commands." });
+    return null;
+  }
+
+  const allowed = await hasPermission(actorCharacter.userId, permission);
+  if (!allowed) {
+    await emitSecurityEvent({
+      eventType: "staff_command_forbidden",
+      severity: "HIGH",
+      actorUserId: actorCharacter.userId,
+      targetType: "character",
+      targetId: String(actorCharacter.id),
+      payload: { command: logAction, actorName: actorName ?? null, ...(extra ?? {}) },
+    });
+    logBridge(logAction, req, startedAt, 403);
+    res.status(403).json({ ok: false, message: "You don't have permission to use police commands in-game." });
+    return null;
+  }
+  return { actorCharacterId: Number(actorCharacter.id), actorUserId: Number(actorCharacter.userId), actorName: actorName ?? "unknown" };
+}
+
+function parsePoliceBodyLogin(body: any): { actorName: string | null; actorPersistentId: string | null } {
+  const { actorName, actorPersistentId } = (body ?? {}) as { actorName?: unknown; actorPersistentId?: unknown };
+  const aName = isNonEmptyString(actorName) && actorName.length <= PLAYER_NAME_MAX ? actorName : null;
+  const aId = isNonEmptyString(actorPersistentId) && actorPersistentId.length <= MAX_IDENTIFIER_LENGTH ? actorPersistentId : null;
+  return { actorName: aName, actorPersistentId: aId };
+}
+
+/**
+ * `!police` root — every player can call this: officers get their role flags +
+ * the full citizen view of their own civil state, citizens get fines/licenses/
+ * warrants/jail status. The pack uses it to render the correct menu.
+ */
+bridgeRouter.post("/police/me", async (req, res) => {
+  const actor = await requireBridgeActor(res, req.body);
+  if (!actor) return;
+  const mine = await police.getMineState(actor.characterId);
+  logBridge("police.me", req, Date.now(), 200);
+  res.json({ ok: true, mine });
+});
+
+/** MDT roles — read-only flags so the pack can build the officer menu. */
+bridgeRouter.post("/police/roles", async (req, res) => {
+  const actor = await requireBridgeActor(res, req.body);
+  if (!actor) return;
+  const [canView, canManage, canAdmin] = await Promise.all([
+    hasPermission(actor.userId, "police.view"),
+    hasPermission(actor.userId, "police.manage"),
+    hasPermission(actor.userId, "police.admin"),
+  ]);
+  logBridge("police.roles", req, Date.now(), 200);
+  res.json({ ok: true, roles: { canView, canManage, canAdmin } });
+});
+
+/** MDT lookup by citizen name or citizen id (officer). */
+bridgeRouter.post("/police/lookup/character", async (req, res) => {
+  const login = parsePoliceBodyLogin(req.body);
+  const actor = await authorizePoliceActor({ req, res, permission: "police.view", command: "lookup.character", actorName: login.actorName, actorPersistentId: login.actorPersistentId });
+  if (!actor) return;
+  const query = isNonEmptyString((req.body ?? {}).query) ? String((req.body ?? {}).query).trim() : "";
+  if (query.length === 0 || query.length > 128) {
+    return res.status(400).json({ ok: false, message: "query (citizen name or citizen id) is required." });
+  }
+  let target = await police.findCitizenByCitizenId(query);
+  if (!target) target = await police.findCitizenByName(query);
+  if (!target) return res.status(404).json({ ok: false, message: "No citizen found for that name or citizen id." });
+
+  const citizen = await police.getCitizenMdt(target.id);
+  if (!citizen) return res.status(404).json({ ok: false, message: "Citizen not found." });
+  logBridge("police.lookup.character", req, Date.now(), 200);
+  res.json({ ok: true, citizen });
+});
+
+/** MDT vehicle record lookup by plate (officer). */
+bridgeRouter.post("/police/lookup/vehicle", async (req, res) => {
+  const login = parsePoliceBodyLogin(req.body);
+  const actor = await authorizePoliceActor({ req, res, permission: "police.view", command: "lookup.vehicle", actorName: login.actorName, actorPersistentId: login.actorPersistentId });
+  if (!actor) return;
+  const plate = parsePlates((req.body ?? {}).plate);
+  if (!plate) return res.status(400).json({ ok: false, message: "plate (1-16 chars) is required." });
+  const vehicleRow = await police.lookupVehicle(plate);
+  if (!vehicleRow) return res.status(404).json({ ok: false, message: "No vehicle found with that plate." });
+  logBridge("police.lookup.vehicle", req, Date.now(), 200);
+  res.json({ ok: true, vehicle: vehicleRow });
+});
+
+/** Issue / suspend / revoke a license for an online citizen. */
+bridgeRouter.post("/police/license", async (req, res) => {
+  const login = parsePoliceBodyLogin(req.body);
+  const { action, licenseType, notes, targetName, targetPersistentId } = (req.body ?? {}) as { action?: unknown; licenseType?: unknown; notes?: unknown; targetName?: unknown; targetPersistentId?: unknown };
+  if (!["issue", "suspend", "revoke"].includes(String(action))) {
+    return res.status(400).json({ ok: false, message: "action must be issue, suspend or revoke." });
+  }
+  if (typeof licenseType !== "string" || !police.VALID_LICENSE_TYPES.has(licenseType)) {
+    return res.status(400).json({ ok: false, message: "licenseType must be one of: driving, weapon, business, fishing, aviation." });
+  }
+  if (!isNonEmptyString(targetPersistentId) || targetPersistentId.length > MAX_IDENTIFIER_LENGTH) {
+    return res.status(400).json({ ok: false, message: "targetPersistentId is required." });
+  }
+  const actor = await authorizePoliceActor({ req, res, permission: "police.manage", command: "license", actorName: login.actorName, actorPersistentId: login.actorPersistentId, extra: { licenseType, action } });
+  if (!actor) return;
+  const target = await resolveTargetCharacter({ targetPersistentId: String(targetPersistentId), targetName: isNonEmptyString(targetName) ? String(targetName) : "target", res, logAction: "police.license", req });
+  if (!target) return;
+
+  await policeCall(req, res, "police.license", async () => {
+    const license = await police.setLicense({
+      characterId: target.targetCharacterId,
+      licenseType: String(licenseType),
+      action: String(action) as "issue" | "suspend" | "revoke",
+      notes: notes == null ? null : String(notes),
+      actorUserId: actor.actorUserId,
+      requestId: (req as unknown as { requestId?: string }).requestId ?? null,
+    });
+    return { license };
+  });
+});
+
+/** Issue a fine to an online citizen (money moves only when the citizen pays). */
+bridgeRouter.post("/police/fine", async (req, res) => {
+  const login = parsePoliceBodyLogin(req.body);
+  const { amountCents, currency, reason, targetName, targetPersistentId } = (req.body ?? {}) as { amountCents?: unknown; currency?: unknown; reason?: unknown; targetName?: unknown; targetPersistentId?: unknown };
+  const cents = typeof amountCents === "number" && Number.isSafeInteger(amountCents) && amountCents > 0 ? amountCents : null;
+  if (cents === null) return res.status(400).json({ ok: false, message: "amountCents must be a positive integer." });
+  const cur = (currency === undefined || currency === null) ? "cash" : String(currency);
+  if (!police.VALID_CURRENCIES.has(cur as economy.Currency)) {
+    return res.status(400).json({ ok: false, message: "currency must be cash, bank or red_money." });
+  }
+  if (!isNonEmptyString(reason) || String(reason).length > 1000) {
+    return res.status(400).json({ ok: false, message: "reason (1-1000 chars) is required." });
+  }
+  if (!isNonEmptyString(targetPersistentId) || targetPersistentId.length > MAX_IDENTIFIER_LENGTH) {
+    return res.status(400).json({ ok: false, message: "targetPersistentId is required." });
+  }
+  const actor = await authorizePoliceActor({ req, res, permission: "police.manage", command: "fine", actorName: login.actorName, actorPersistentId: login.actorPersistentId, extra: { amountCents: cents, currency: cur, reason: String(reason) } });
+  if (!actor) return;
+  const target = await resolveTargetCharacter({ targetPersistentId: String(targetPersistentId), targetName: isNonEmptyString(targetName) ? String(targetName) : "target", res, logAction: "police.fine", req });
+  if (!target) return;
+
+  await policeCall(req, res, "police.fine", async () => {
+    const fine = await police.issueFine({
+      targetCharacterId: target.targetCharacterId,
+      officerCharacterId: actor.actorCharacterId,
+      amountCents: cents,
+      currency: cur as economy.Currency,
+      reason: String(reason),
+      actorUserId: actor.actorUserId,
+      requestId: (req as unknown as { requestId?: string }).requestId ?? null,
+    });
+    return { fine };
+  });
+});
+
+/** A citizen pays their own outstanding fine (money sink). Not an officer verb. */
+bridgeRouter.post("/police/fine/pay", async (req, res) => {
+  const actor = await requireBridgeActor(res, req.body);
+  if (!actor) return;
+  const fineId = parsePoliceId((req.body ?? {}).fineId);
+  if (!fineId) return res.status(400).json({ ok: false, message: "fineId is required." });
+  await policeCall(req, res, "police.fine.pay", async () => {
+    const fine = await police.payFine({
+      fineId,
+      characterId: actor.characterId,
+      actorUserId: actor.userId,
+      requestId: (req as unknown as { requestId?: string }).requestId ?? null,
+    });
+    return { fine };
+  });
+});
+
+/** Officer writes a police report. */
+bridgeRouter.post("/police/report", async (req, res) => {
+  const login = parsePoliceBodyLogin(req.body);
+  const { title, body, classification } = (req.body ?? {}) as { title?: unknown; body?: unknown; classification?: unknown };
+  if (!isNonEmptyString(title) || String(title).length > 200) return res.status(400).json({ ok: false, message: "title (1-200 chars) is required." });
+  if (!isNonEmptyString(body) || String(body).length > 10000) return res.status(400).json({ ok: false, message: "body (1-10000 chars) is required." });
+  if (classification != null && !["general", "restricted", "classified"].includes(String(classification))) {
+    return res.status(400).json({ ok: false, message: "classification must be general, restricted or classified." });
+  }
+  const actor = await authorizePoliceActor({ req, res, permission: "police.manage", command: "report", actorName: login.actorName, actorPersistentId: login.actorPersistentId, extra: { title: String(title) } });
+  if (!actor) return;
+  await policeCall(req, res, "police.report", async () => {
+    const report = await police.createReport({
+      officerCharacterId: actor.actorCharacterId,
+      title: String(title),
+      body: String(body),
+      classification: classification == null ? "general" : String(classification),
+      actorUserId: actor.actorUserId,
+      requestId: (req as unknown as { requestId?: string }).requestId ?? null,
+    });
+    return { report };
+  });
+});
+
+/** Officer closes a report. */
+bridgeRouter.post("/police/report/close", async (req, res) => {
+  const login = parsePoliceBodyLogin(req.body);
+  const reportId = parsePoliceId((req.body ?? {}).reportId);
+  if (!reportId) return res.status(400).json({ ok: false, message: "reportId is required." });
+  const actor = await authorizePoliceActor({ req, res, permission: "police.manage", command: "report.close", actorName: login.actorName, actorPersistentId: login.actorPersistentId, extra: { reportId } });
+  if (!actor) return;
+  await policeCall(req, res, "police.report.close", async () => {
+    const report = await police.closeReport({ reportId, actorUserId: actor.actorUserId, requestId: (req as unknown as { requestId?: string }).requestId ?? null });
+    return { report };
+  });
+});
+
+/** Officer logs an evidence record (optionally attached to a report). */
+bridgeRouter.post("/police/evidence", async (req, res) => {
+  const login = parsePoliceBodyLogin(req.body);
+  const { reportId, description, itemId, quantity } = (req.body ?? {}) as { reportId?: unknown; description?: unknown; itemId?: unknown; quantity?: unknown };
+  if (!isNonEmptyString(description) || String(description).length > 1000) return res.status(400).json({ ok: false, message: "description (1-1000 chars) is required." });
+  if (reportId != null && parsePoliceId(reportId) === null) return res.status(400).json({ ok: false, message: "reportId must be a positive integer." });
+  const actor = await authorizePoliceActor({ req, res, permission: "police.manage", command: "evidence", actorName: login.actorName, actorPersistentId: login.actorPersistentId, extra: { description: String(description) } });
+  if (!actor) return;
+  await policeCall(req, res, "police.evidence", async () => {
+    const evidence = await police.addEvidence({
+      reportId: reportId == null ? null : parsePoliceId(reportId),
+      officerCharacterId: actor.actorCharacterId,
+      description: String(description),
+      itemId: itemId == null ? null : String(itemId),
+      quantity: typeof quantity === "number" ? quantity : undefined,
+      actorUserId: actor.actorUserId,
+      requestId: (req as unknown as { requestId?: string }).requestId ?? null,
+    });
+    return { evidence };
+  });
+});
+
+/** Officer issues an arrest/search warrant (minutes = optional self-expiry). */
+bridgeRouter.post("/police/warrant", async (req, res) => {
+  const login = parsePoliceBodyLogin(req.body);
+  const { warrantType, reason, minutes, targetName, targetPersistentId } = (req.body ?? {}) as { warrantType?: unknown; reason?: unknown; minutes?: unknown; targetName?: unknown; targetPersistentId?: unknown };
+  if (typeof warrantType !== "string" || !police.VALID_WARRANT_TYPES.has(warrantType)) {
+    return res.status(400).json({ ok: false, message: "warrantType must be arrest or search." });
+  }
+  if (!isNonEmptyString(reason) || String(reason).length > 1000) return res.status(400).json({ ok: false, message: "reason (1-1000 chars) is required." });
+  if (!isNonEmptyString(targetPersistentId) || targetPersistentId.length > MAX_IDENTIFIER_LENGTH) {
+    return res.status(400).json({ ok: false, message: "targetPersistentId is required." });
+  }
+  const m = minutes == null ? 0 : Number(minutes);
+  if (!Number.isSafeInteger(m) || m < 0 || m > 10080) return res.status(400).json({ ok: false, message: "minutes must be 0-10080 (0 = no expiry)." });
+  const actor = await authorizePoliceActor({ req, res, permission: "police.manage", command: "warrant", actorName: login.actorName, actorPersistentId: login.actorPersistentId, extra: { warrantType: String(warrantType) } });
+  if (!actor) return;
+  const target = await resolveTargetCharacter({ targetPersistentId: String(targetPersistentId), targetName: isNonEmptyString(targetName) ? String(targetName) : "target", res, logAction: "police.warrant", req });
+  if (!target) return;
+  await policeCall(req, res, "police.warrant", async () => {
+    const warrant = await police.issueWarrant({
+      targetCharacterId: target.targetCharacterId,
+      warrantType: String(warrantType),
+      reason: String(reason),
+      officerCharacterId: actor.actorCharacterId,
+      expiresAt: m > 0 ? new Date(Date.now() + m * 60_000) : null,
+      actorUserId: actor.actorUserId,
+      requestId: (req as unknown as { requestId?: string }).requestId ?? null,
+    });
+    return { warrant };
+  });
+});
+
+/** Senior staff revokes a warrant. */
+bridgeRouter.post("/police/warrant/revoke", async (req, res) => {
+  const login = parsePoliceBodyLogin(req.body);
+  const warrantId = parsePoliceId((req.body ?? {}).warrantId);
+  if (!warrantId) return res.status(400).json({ ok: false, message: "warrantId is required." });
+  const actor = await authorizePoliceActor({ req, res, permission: "police.admin", command: "warrant.revoke", actorName: login.actorName, actorPersistentId: login.actorPersistentId, extra: { warrantId } });
+  if (!actor) return;
+  await policeCall(req, res, "police.warrant.revoke", async () => {
+    const warrant = await police.revokeWarrant({ warrantId, actorUserId: actor.actorUserId, requestId: (req as unknown as { requestId?: string }).requestId ?? null });
+    return { warrant };
+  });
+});
+
+/** Officer arrests an online citizen (optional auto-executed arrest warrant). */
+bridgeRouter.post("/police/arrest", async (req, res) => {
+  const login = parsePoliceBodyLogin(req.body);
+  const { reason, minutes, targetName, targetPersistentId } = (req.body ?? {}) as { reason?: unknown; minutes?: unknown; targetName?: unknown; targetPersistentId?: unknown };
+  if (!isNonEmptyString(reason) || String(reason).length > 1000) return res.status(400).json({ ok: false, message: "reason (1-1000 chars) is required." });
+  const m = typeof minutes === "number" ? Math.round(minutes) : 120;
+  if (!Number.isSafeInteger(m) || m < police.MIN_ARREST_MINUTES || m > police.MAX_ARREST_MINUTES) {
+    return res.status(400).json({ ok: false, message: `minutes must be between ${police.MIN_ARREST_MINUTES} and ${police.MAX_ARREST_MINUTES}.` });
+  }
+  if (!isNonEmptyString(targetPersistentId) || targetPersistentId.length > MAX_IDENTIFIER_LENGTH) {
+    return res.status(400).json({ ok: false, message: "targetPersistentId is required." });
+  }
+  const actor = await authorizePoliceActor({ req, res, permission: "police.manage", command: "arrest", actorName: login.actorName, actorPersistentId: login.actorPersistentId, extra: { minutes: m, reason: String(reason) } });
+  if (!actor) return;
+  const target = await resolveTargetCharacter({ targetPersistentId: String(targetPersistentId), targetName: isNonEmptyString(targetName) ? String(targetName) : "target", res, logAction: "police.arrest", req });
+  if (!target) return;
+  await policeCall(req, res, "police.arrest", async () => {
+    const arrest = await police.arrestCharacter({
+      characterId: target.targetCharacterId,
+      officerCharacterId: actor.actorCharacterId,
+      reason: String(reason),
+      minutes: m,
+      actorUserId: actor.actorUserId,
+      requestId: (req as unknown as { requestId?: string }).requestId ?? null,
+    });
+    return { arrest };
+  });
+});
+
+/** Warden/senior officer releases a jailed citizen early. */
+bridgeRouter.post("/police/release", async (req, res) => {
+  const login = parsePoliceBodyLogin(req.body);
+  const { targetName, targetPersistentId } = (req.body ?? {}) as { targetName?: unknown; targetPersistentId?: unknown };
+  if (!isNonEmptyString(targetPersistentId) || targetPersistentId.length > MAX_IDENTIFIER_LENGTH) {
+    return res.status(400).json({ ok: false, message: "targetPersistentId is required." });
+  }
+  const actor = await authorizePoliceActor({ req, res, permission: "police.manage", command: "release", actorName: login.actorName, actorPersistentId: login.actorPersistentId });
+  if (!actor) return;
+  const target = await resolveTargetCharacter({ targetPersistentId: String(targetPersistentId), targetName: isNonEmptyString(targetName) ? String(targetName) : "target", res, logAction: "police.release", req });
+  if (!target) return;
+  await policeCall(req, res, "police.release", async () => {
+    const arrest = await police.releaseArrest({
+      characterId: target.targetCharacterId,
+      releasedByCharacterId: actor.actorCharacterId,
+      actorUserId: actor.actorUserId,
+      requestId: (req as unknown as { requestId?: string }).requestId ?? null,
+    });
+    return { arrest };
+  });
+});
+
+/** Officer updates a citizen's police record (alias / threat level / notes). */
+bridgeRouter.post("/police/record", async (req, res) => {
+  const login = parsePoliceBodyLogin(req.body);
+  const { alias, threatLevel, notes, targetName, targetPersistentId } = (req.body ?? {}) as { alias?: unknown; threatLevel?: unknown; notes?: unknown; targetName?: unknown; targetPersistentId?: unknown };
+  if (threatLevel != null && !police.VALID_THREAT_LEVELS.has(String(threatLevel))) {
+    return res.status(400).json({ ok: false, message: "threatLevel must be none, low, medium, high or critical." });
+  }
+  if (!isNonEmptyString(targetPersistentId) || targetPersistentId.length > MAX_IDENTIFIER_LENGTH) {
+    return res.status(400).json({ ok: false, message: "targetPersistentId is required." });
+  }
+  const actor = await authorizePoliceActor({ req, res, permission: "police.manage", command: "record", actorName: login.actorName, actorPersistentId: login.actorPersistentId, extra: { threatLevel: threatLevel ?? null } });
+  if (!actor) return;
+  const target = await resolveTargetCharacter({ targetPersistentId: String(targetPersistentId), targetName: isNonEmptyString(targetName) ? String(targetName) : "target", res, logAction: "police.record", req });
+  if (!target) return;
+  await policeCall(req, res, "police.record", async () => {
+    const record = await police.upsertRecord({
+      characterId: target.targetCharacterId,
+      alias: alias == null ? null : String(alias),
+      threatLevel: threatLevel == null ? null : String(threatLevel),
+      notes: notes == null ? null : String(notes),
+      actorUserId: actor.actorUserId,
+      requestId: (req as unknown as { requestId?: string }).requestId ?? null,
+    });
+    return { record };
+  });
 });

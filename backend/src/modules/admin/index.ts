@@ -14,6 +14,7 @@ import * as cases from "../cases/index.js";
 import * as security from "../security/index.js";
 import * as vehicleAdmin from "../vehicle/index.js";
 import * as propertyAdmin from "../property/index.js";
+import * as policeAdmin from "../police/index.js";
 
 /**
  * Admin HTTP routes. Every route:
@@ -880,6 +881,376 @@ adminRouter.delete("/properties/:id", requirePermission("property.manage"), asyn
     res.status(204).end();
   } catch (err: any) {
     propertyAdminError(res, err);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Police — MDT (citizen/vehicle records), fines, warrants, reports, licenses,
+// arrests. Mirrors the bridge police surface; delegates to the police module
+// (which audits everything). Ranking: police.view read, police.manage write,
+// police.admin senior actions (warrant revoke, early release).
+// ---------------------------------------------------------------------------
+
+function policeAdminError(res: any, err: any) {
+  const e = err as any;
+  if (
+    e instanceof policeAdmin.CitizenNotFoundError ||
+    e instanceof policeAdmin.VehicleNotFoundError ||
+    e instanceof policeAdmin.LicenseNotFoundError ||
+    e instanceof policeAdmin.FineNotFoundError ||
+    e instanceof policeAdmin.ReportNotFoundError ||
+    e instanceof policeAdmin.WarrantNotFoundError ||
+    e instanceof policeAdmin.ArrestNotFoundError
+  ) {
+    return res.status(404).json({ error: e.message });
+  }
+  if (
+    e instanceof policeAdmin.FineAccessDeniedError ||
+    e instanceof policeAdmin.LicenseExistsError ||
+    e instanceof policeAdmin.FineAlreadyPaidError ||
+    e instanceof policeAdmin.WarrantNotActiveError ||
+    e instanceof policeAdmin.CharacterAlreadyInJailError ||
+    e instanceof policeAdmin.ArrestNotActiveError ||
+    e instanceof economy.InsufficientFundsError
+  ) {
+    return res.status(409).json({ error: e.message });
+  }
+  return res.status(500).json({ error: e.message });
+}
+
+async function parsePoliceIdOr400(req: any, res: any): Promise<number | null> {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) {
+    res.status(400).json({ error: "police id must be a positive integer" });
+    return null;
+  }
+  return id;
+}
+
+async function parseCharacterIdOr400(req: any, res: any): Promise<number | null> {
+  const id = Number(req.body.characterId ?? req.body.targetCharacterId);
+  if (!Number.isInteger(id) || id <= 0) {
+    res.status(400).json({ error: "characterId must be a positive integer" });
+    return null;
+  }
+  return id;
+}
+
+adminRouter.get("/police/citizens", requirePermission("police.view"), async (req, res) => {
+  try {
+    const limit = Number(req.query.limit ?? 50);
+    const offset = Number(req.query.offset ?? 0);
+    const query = typeof req.query.query === "string" ? req.query.query : undefined;
+    const citizens = await policeAdmin.listCitizens({
+      query,
+      limit: Number.isFinite(limit) ? Math.max(1, Math.min(limit, 200)) : 50,
+      offset: Number.isFinite(offset) ? Math.max(0, offset) : 0,
+    });
+    res.json({ citizens });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+adminRouter.get("/police/citizens/:id", requirePermission("police.view"), async (req, res) => {
+  const id = await parsePoliceIdOr400(req, res);
+  if (!id) return;
+  try {
+    const citizen = await policeAdmin.getCitizenMdt(id);
+    if (!citizen) return res.status(404).json({ error: "citizen not found" });
+    res.json({ citizen });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+adminRouter.get("/police/vehicles", requirePermission("police.view"), async (req, res) => {
+  try {
+    const plate = typeof req.query.plate === "string" ? req.query.plate.trim().toUpperCase() : "";
+    if (plate.length === 0) return res.json({ vehicles: [] });
+    const vehicleRow = await policeAdmin.lookupVehicle(plate);
+    res.json({ vehicles: vehicleRow ? [vehicleRow] : [] });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+adminRouter.post("/police/licenses", requirePermission("police.manage"), async (req, res) => {
+  const { licenseType, action, notes } = req.body ?? {};
+  const characterId = await parseCharacterIdOr400(req, res);
+  if (!characterId) return;
+  if (typeof licenseType !== "string" || !policeAdmin.VALID_LICENSE_TYPES.has(licenseType)) {
+    return res.status(400).json({ error: "licenseType must be one of: driving, weapon, business, fishing, aviation" });
+  }
+  if (!["issue", "suspend", "revoke"].includes(String(action ?? ""))) {
+    return res.status(400).json({ error: "action must be issue, suspend or revoke" });
+  }
+  try {
+    const license = await policeAdmin.setLicense({
+      characterId,
+      licenseType,
+      action: String(action) as "issue" | "suspend" | "revoke",
+      notes: notes == null ? null : String(notes),
+      actorUserId: req.userId!,
+      requestId: requestIdOf(req),
+    });
+    res.json({ license });
+  } catch (err: any) {
+    policeAdminError(res, err);
+  }
+});
+
+adminRouter.get("/police/fines", requirePermission("police.view"), async (req, res) => {
+  try {
+    const limit = Number(req.query.limit ?? 50);
+    const offset = Number(req.query.offset ?? 0);
+    const status = typeof req.query.status === "string" ? req.query.status : undefined;
+    const fines = await policeAdmin.listFines({
+      status,
+      limit: Number.isFinite(limit) ? Math.max(1, Math.min(limit, 200)) : 50,
+      offset: Number.isFinite(offset) ? Math.max(0, offset) : 0,
+    });
+    res.json({ fines });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+adminRouter.post("/police/fines", requirePermission("police.manage"), async (req, res) => {
+  const { amountCents, currency, reason } = req.body ?? {};
+  const characterId = await parseCharacterIdOr400(req, res);
+  if (!characterId) return;
+  const cents = Number(amountCents);
+  if (!Number.isSafeInteger(cents) || cents <= 0) return res.status(400).json({ error: "amountCents must be a positive integer" });
+  const cur = currency === undefined || currency === null ? "cash" : String(currency);
+  if (!policeAdmin.VALID_CURRENCIES.has(cur as economy.Currency)) {
+    return res.status(400).json({ error: "currency must be cash, bank or red_money" });
+  }
+  if (typeof reason !== "string" || reason.trim().length === 0 || reason.length > 1000) {
+    return res.status(400).json({ error: "reason (1-1000 chars) is required" });
+  }
+  try {
+    const fine = await policeAdmin.issueFine({
+      targetCharacterId: characterId,
+      officerCharacterId: null,
+      amountCents: cents,
+      currency: cur as economy.Currency,
+      reason: reason.trim(),
+      actorUserId: req.userId!,
+      requestId: requestIdOf(req),
+    });
+    res.json({ fine });
+  } catch (err: any) {
+    policeAdminError(res, err);
+  }
+});
+
+/** Pay a specific outstanding fine on the citizen's behalf. */
+adminRouter.post("/police/fines/:id/pay", requirePermission("police.manage"), async (req, res) => {
+  const id = await parsePoliceIdOr400(req, res);
+  if (!id) return;
+  try {
+    const fine = await policeAdmin.getFine(id);
+    if (!fine || fine.status !== "outstanding") return res.status(404).json({ error: "outstanding fine not found" });
+    const paid = await policeAdmin.payFine({
+      fineId: id,
+      characterId: fine.targetCharacterId,
+      actorUserId: req.userId!,
+      requestId: requestIdOf(req),
+    });
+    res.json({ fine: paid });
+  } catch (err: any) {
+    policeAdminError(res, err);
+  }
+});
+
+adminRouter.get("/police/warrants", requirePermission("police.view"), async (req, res) => {
+  try {
+    const limit = Number(req.query.limit ?? 50);
+    const offset = Number(req.query.offset ?? 0);
+    const status = typeof req.query.status === "string" ? req.query.status : undefined;
+    const warrants = await policeAdmin.listWarrants({
+      status,
+      limit: Number.isFinite(limit) ? Math.max(1, Math.min(limit, 200)) : 50,
+      offset: Number.isFinite(offset) ? Math.max(0, offset) : 0,
+    });
+    res.json({ warrants });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+adminRouter.post("/police/warrants", requirePermission("police.manage"), async (req, res) => {
+  const { warrantType, reason, minutes } = req.body ?? {};
+  const characterId = await parseCharacterIdOr400(req, res);
+  if (!characterId) return;
+  if (typeof warrantType !== "string" || !policeAdmin.VALID_WARRANT_TYPES.has(warrantType)) {
+    return res.status(400).json({ error: "warrantType must be arrest or search" });
+  }
+  if (typeof reason !== "string" || reason.trim().length === 0 || reason.length > 1000) {
+    return res.status(400).json({ error: "reason (1-1000 chars) is required" });
+  }
+  const m = minutes == null ? 0 : Number(minutes);
+  if (!Number.isSafeInteger(m) || m < 0 || m > 10080) return res.status(400).json({ error: "minutes must be 0-10080 (0 = no expiry)" });
+  try {
+    const warrant = await policeAdmin.issueWarrant({
+      targetCharacterId: characterId,
+      warrantType,
+      reason: reason.trim(),
+      officerCharacterId: null,
+      expiresAt: m > 0 ? new Date(Date.now() + m * 60_000) : null,
+      actorUserId: req.userId!,
+      requestId: requestIdOf(req),
+    });
+    res.json({ warrant });
+  } catch (err: any) {
+    policeAdminError(res, err);
+  }
+});
+
+adminRouter.post("/police/warrants/:id/revoke", requirePermission("police.admin"), async (req, res) => {
+  const id = await parsePoliceIdOr400(req, res);
+  if (!id) return;
+  try {
+    const warrant = await policeAdmin.revokeWarrant({ warrantId: id, actorUserId: req.userId!, requestId: requestIdOf(req) });
+    res.json({ warrant });
+  } catch (err: any) {
+    policeAdminError(res, err);
+  }
+});
+
+adminRouter.get("/police/reports", requirePermission("police.view"), async (req, res) => {
+  try {
+    const limit = Number(req.query.limit ?? 50);
+    const offset = Number(req.query.offset ?? 0);
+    const status = typeof req.query.status === "string" ? req.query.status : undefined;
+    const reports = await policeAdmin.listReports({
+      status,
+      limit: Number.isFinite(limit) ? Math.max(1, Math.min(limit, 200)) : 50,
+      offset: Number.isFinite(offset) ? Math.max(0, offset) : 0,
+    });
+    res.json({ reports });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+adminRouter.post("/police/reports", requirePermission("police.manage"), async (req, res) => {
+  const { title, body, classification } = req.body ?? {};
+  if (typeof title !== "string" || title.trim().length === 0 || title.length > 200) {
+    return res.status(400).json({ error: "title (1-200 chars) is required" });
+  }
+  if (typeof body !== "string" || body.trim().length === 0 || body.length > 10000) {
+    return res.status(400).json({ error: "body (1-10000 chars) is required" });
+  }
+  if (classification != null && !["general", "restricted", "classified"].includes(String(classification))) {
+    return res.status(400).json({ error: "classification must be general, restricted or classified" });
+  }
+  try {
+    const report = await policeAdmin.createReport({
+      officerCharacterId: null,
+      title: title.trim(),
+      body: body.trim(),
+      classification: classification == null ? "general" : String(classification),
+      actorUserId: req.userId!,
+      requestId: requestIdOf(req),
+    });
+    res.json({ report });
+  } catch (err: any) {
+    policeAdminError(res, err);
+  }
+});
+
+adminRouter.post("/police/reports/:id/close", requirePermission("police.manage"), async (req, res) => {
+  const id = await parsePoliceIdOr400(req, res);
+  if (!id) return;
+  try {
+    const report = await policeAdmin.closeReport({ reportId: id, actorUserId: req.userId!, requestId: requestIdOf(req) });
+    res.json({ report });
+  } catch (err: any) {
+    policeAdminError(res, err);
+  }
+});
+
+adminRouter.get("/police/arrests", requirePermission("police.view"), async (req, res) => {
+  try {
+    const limit = Number(req.query.limit ?? 50);
+    const offset = Number(req.query.offset ?? 0);
+    const status = typeof req.query.status === "string" ? req.query.status : undefined;
+    const arrests = await policeAdmin.listArrests({
+      status,
+      limit: Number.isFinite(limit) ? Math.max(1, Math.min(limit, 200)) : 50,
+      offset: Number.isFinite(offset) ? Math.max(0, offset) : 0,
+    });
+    res.json({ arrests });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+adminRouter.post("/police/arrests", requirePermission("police.manage"), async (req, res) => {
+  const { reason, minutes } = req.body ?? {};
+  const characterId = await parseCharacterIdOr400(req, res);
+  if (!characterId) return;
+  if (typeof reason !== "string" || reason.trim().length === 0 || reason.length > 1000) {
+    return res.status(400).json({ error: "reason (1-1000 chars) is required" });
+  }
+  const m = minutes == null ? 120 : Math.round(Number(minutes));
+  if (!Number.isSafeInteger(m) || m < policeAdmin.MIN_ARREST_MINUTES || m > policeAdmin.MAX_ARREST_MINUTES) {
+    return res.status(400).json({ error: `minutes must be between ${policeAdmin.MIN_ARREST_MINUTES} and ${policeAdmin.MAX_ARREST_MINUTES}` });
+  }
+  try {
+    const arrest = await policeAdmin.arrestCharacter({
+      characterId,
+      officerCharacterId: null,
+      reason: reason.trim(),
+      minutes: m,
+      actorUserId: req.userId!,
+      requestId: requestIdOf(req),
+    });
+    res.json({ arrest });
+  } catch (err: any) {
+    policeAdminError(res, err);
+  }
+});
+
+/** Early release of a jailed citizen (senior staff). */
+adminRouter.post("/police/release", requirePermission("police.admin"), async (req, res) => {
+  const characterId = await parseCharacterIdOr400(req, res);
+  if (!characterId) return;
+  try {
+    const arrest = await policeAdmin.releaseArrest({
+      characterId,
+      releasedByCharacterId: null,
+      actorUserId: req.userId!,
+      requestId: requestIdOf(req),
+    });
+    res.json({ arrest });
+  } catch (err: any) {
+    policeAdminError(res, err);
+  }
+});
+
+/** Update a citizen's police record (alias / threat level / notes). */
+adminRouter.post("/police/records", requirePermission("police.manage"), async (req, res) => {
+  const { alias, threatLevel, notes } = req.body ?? {};
+  const characterId = await parseCharacterIdOr400(req, res);
+  if (!characterId) return;
+  if (threatLevel != null && !policeAdmin.VALID_THREAT_LEVELS.has(String(threatLevel))) {
+    return res.status(400).json({ error: "threatLevel must be none, low, medium, high or critical" });
+  }
+  try {
+    const record = await policeAdmin.upsertRecord({
+      characterId,
+      alias: alias == null ? null : String(alias),
+      threatLevel: threatLevel == null ? null : String(threatLevel),
+      notes: notes == null ? null : String(notes),
+      actorUserId: req.userId!,
+      requestId: requestIdOf(req),
+    });
+    res.json({ record });
+  } catch (err: any) {
+    policeAdminError(res, err);
   }
 });
 

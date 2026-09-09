@@ -189,6 +189,7 @@ const APP_JS = `
     page.appendChild(el('<div id="container-card" class="card"><h2>ตู้เก็บของ</h2><p class="muted">กำลังโหลด…</p></div>'));
     page.appendChild(el('<div id="garage-card" class="card"><h2>อู่ของคุณ</h2><p class="muted">กำลังโหลด…</p></div>'));
     page.appendChild(el('<div id="property-card" class="card"><h2>อสังหาริมทรัพย์</h2><p class="muted">กำลังโหลด…</p></div>'));
+    page.appendChild(el('<div id="police-card" class="card"><h2>สถานะทางกฎหมาย</h2><p class="muted">กำลังโหลด…</p></div>'));
     setApp(page);
 
     // link-code area
@@ -218,20 +219,22 @@ const APP_JS = `
       });
     }
 
-    // wallet + carry + containers + garage + properties (parallel)
+    // wallet + carry + containers + garage + properties + police (parallel)
     Promise.all([
       api("/character/wallet"),
       api("/character/inventory"),
       api("/inventories"),
       api("/character/vehicles"),
       api("/character/properties"),
+      api("/character/police"),
     ]).then(function (results) {
-      var wallet = results[0], inv = results[1], containers = results[2], garage = results[3], properties = results[4];
+      var wallet = results[0], inv = results[1], containers = results[2], garage = results[3], properties = results[4], policeState = results[5];
       renderWallet(page.querySelector("#wallet-card"), wallet);
       renderCarry(page.querySelector("#carry-card"), inv);
       renderContainers(page.querySelector("#container-card"), containers, page);
       renderGarage(page.querySelector("#garage-card"), garage);
       renderProperties(page.querySelector("#property-card"), properties);
+      renderCivil(page.querySelector("#police-card"), policeState);
     });
   }
 
@@ -334,6 +337,46 @@ const APP_JS = `
     if (keys) {
       card.appendChild(el('<h3>🔑 กุญแจที่ถือ</h3>' + "<table><tr><th>ที่อยู่</th><th>สถานะ</th><th>ประเภท</th><th>ราคาขาย</th></tr>" + keys + "</table>"));
     }
+  }
+
+  function renderCivil(card, policeState) {
+    if (!policeState.ok) { card.innerHTML = '<h2>สถานะทางกฎหมาย</h2><p class="muted">' + esc((policeState.data && policeState.data.error) || "ไม่พร้อมใช้งาน") + '</p>'; return; }
+    var d = policeState.data && policeState.data.police;
+    if (!d) { card.innerHTML = '<h2>สถานะทางกฎหมาย</h2><p class="muted">ไม่มีข้อมูล</p>'; return; }
+    var lic = (d.licenses || []).map(function (l) {
+      return '<span class="tag ' + (l.status === "revoked" ? "neutral" : "ok") + '">' + esc(l.licenseType) + ": " + esc(l.status) + "</span>";
+    }).join(" ");
+    var fines = (d.fines || []).filter(function (f) { return f.status === "outstanding"; });
+    var fineRows = fines.map(function (f) {
+      return "<tr><td>" + esc(f.reason) + "</td><td>" + money(f.amountCents) + " " + esc(f.currency) + "</td>" +
+        "<td><button class=\\"btn small primary\\" data-finepay=\\"" + f.id + "\\">จ่าย</button></td></tr>";
+    }).join("");
+    var warrants = (d.warrants || []).map(function (w) { return esc(w.warrantType) + " (" + esc(w.reason) + ")"; }).join(", ");
+    var jail = d.arrest
+      ? '<p class="tag warn">อยู่ในคุก เหลือ ' + d.arrest.minutesRemaining + " นาที (" + fmtDate(d.arrest.jailUntil) + ")</p>"
+      : "";
+    card.innerHTML =
+      '<h2>สถานะทางกฎหมาย</h2>' +
+      '<p>บัตร: ' + (lic || '<span class="muted">ยังไม่มีบัตร</span>') + '</p>' +
+      '<p>หมายศาล: ' + (warrants || '<span class="muted">ไม่มี</span>') + '</p>' +
+      jail +
+      (fineRows ? "<table><tr><th>ค่าปรับ</th><th>จำนวน</th><th></th></tr>" + fineRows + "</table>"
+        : '<p class="muted">ไม่มีค่าปรับค้างชำระ</p>');
+    card.querySelectorAll("[data-finepay]").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var id = Number(btn.getAttribute("data-finepay"));
+        if (!confirm("จ่ายค่าปรับ #" + id + " จากกระเป๋าเงิน? (เป็นค่าปรับคืนไม่ได้)")) return;
+        btn.disabled = true;
+        api("/character/fines/" + id + "/pay", { method: "POST" }).then(function (r) {
+          btn.disabled = false;
+          toast(r.ok ? "จ่ายแล้ว" : ((r.data && (r.data.error || r.data.message)) || "ไม่สำเร็จ"));
+          api("/character/police").then(function (next) {
+            renderCivil(card, next);
+            api("/character/wallet").then(function (w) { renderWallet(document.querySelector("#wallet-card"), w); });
+          });
+        });
+      });
+    });
   }
 
   async function boot() {

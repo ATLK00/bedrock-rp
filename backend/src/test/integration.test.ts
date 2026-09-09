@@ -147,6 +147,15 @@ async function grantOwnerRole(pool: pg.Pool, userId: number) {
   );
 }
 
+async function grantRoleByName(pool: pg.Pool, userId: number, roleName: string) {
+  const { rows } = await pool.query(`SELECT id FROM roles WHERE name = $1`, [roleName]);
+  assert.ok(rows[0], `role ${roleName} must exist (was it migrated?)`);
+  await pool.query(
+    `INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+    [userId, rows[0].id]
+  );
+}
+
 test("integration suite", async (t) => {
   const ctx: any = await prepareTestDatabase();
   const {
@@ -1876,6 +1885,246 @@ test("integration suite", async (t) => {
     ]) {
       assert.ok((byAction[action] ?? 0) >= 1, `expected audit rows for ${action}`);
     }
+  });
+
+  await t.test("police: MDT lookup / license / fine money-sink / warrant / report+evidence / arrest-jail-release / audit", async () => {
+    const bridgePost = async (path: string, body: unknown) => {
+      const raw = JSON.stringify(body);
+      return fetch(`${baseUrl}${path}`, { method: "POST", headers: signedHeaders(BDS_SECRET, raw), body: raw });
+    };
+    const bridgeJson = async (path: string, body: unknown) =>
+      ((await bridgePost(path, body)).json()) as Promise<any>;
+
+    // fresh characters O (officer) and N (citizen)
+    const o = await upsertUserByDiscordId("3301", "UserO");
+    const tokenO = await issueSessionToken(o.id);
+    assert.equal((await postAs("/character", { name: "Officer" }, tokenO)).status, 201);
+    const n = await upsertUserByDiscordId("3302", "UserN");
+    const tokenN = await issueSessionToken(n.id);
+    assert.equal((await postAs("/character", { name: "Nate" }, tokenN)).status, 201);
+    for (const [tag, xuid] of [["O", "p-O"], ["N", "p-N"]] as const) {
+      const codeRes = await postAs("/character/link-code", {}, tag === "O" ? tokenO : tokenN);
+      const { code } = await codeRes.json();
+      const raw = JSON.stringify({ code, xuid });
+      assert.equal((await fetch(`${baseUrl}/bridge/character/link`, {
+        method: "POST", headers: signedHeaders(BDS_SECRET, raw), body: raw,
+      })).status, 200);
+    }
+    const charO = Number((await pool.query(`SELECT id FROM characters WHERE persistent_id = 'p-O'`)).rows[0].id);
+    const charN = Number((await pool.query(`SELECT id FROM characters WHERE persistent_id = 'p-N'`)).rows[0].id);
+    await ctx.economy.credit({ characterId: charN, amountCents: 150000, reason: "test seed", actorUserId: n.id, currency: "cash" });
+
+    const cashOf = async (cid: number) => Number((await pool.query(
+      `SELECT balance_cents FROM wallets WHERE character_id = $1`, [cid]
+    )).rows[0]?.balance_cents ?? 0);
+    const ledgerRef = async (cid: number, refType: string) => Number((await pool.query(
+      `SELECT COUNT(*)::int FROM transactions WHERE character_id = $1 AND ref_type = $2`,
+      [cid, refType]
+    )).rows[0].count);
+
+    // grant officer role to the officer; nobody else has police perms yet
+    await grantRoleByName(pool, o.id, "police");
+
+    // --- citizen root (anyone) + denial paths
+    const me1 = await bridgeJson("/bridge/police/me", { playerId: "p-O" });
+    assert.equal(me1.ok, true);
+    assert.deepEqual(me1.mine.licenses, []);
+    const rolesO = await bridgeJson("/bridge/police/roles", { playerId: "p-O" });
+    assert.equal(rolesO.roles.canView, true);
+    assert.equal(rolesO.roles.canManage, true);
+    const rolesN = await bridgeJson("/bridge/police/roles", { playerId: "p-N" });
+    assert.equal(rolesN.roles.canView, false);
+
+    // citizen without RBAC is refused and a HIGH security event is raised
+    const denied = await bridgePost("/bridge/police/lookup/character", {
+      playerId: "p-N", actorName: "Nate", actorPersistentId: "p-N", query: "Officer",
+    });
+    assert.equal(denied.status, 403);
+    const sec = (await pool.query(
+      `SELECT COUNT(*)::int AS n FROM security_events WHERE event_type = 'staff_command_forbidden' AND payload->>'command' = 'police.lookup.character' AND actor_user_id = $1`,
+      [n.id]
+    )).rows[0];
+    assert.equal(sec.n, 1, "denial must raise a HIGH security event");
+
+    // unknown actor persistentId -> 404
+    assert.equal((await bridgePost("/bridge/police/lookup/character", {
+      playerId: "p-O", actorName: "Ghost", actorPersistentId: "p-ghost", query: "Officer",
+    })).status, 404);
+
+    // --- MDT citizen + vehicle lookups
+    const lookup = await bridgeJson("/bridge/police/lookup/character", {
+      playerId: "p-O", actorName: "Officer", actorPersistentId: "p-O", query: "Nate",
+    });
+    assert.equal(lookup.ok, true);
+    assert.equal(Number(lookup.citizen.id), charN);
+    assert.equal(lookup.citizen.record, null, "no police record yet");
+
+    const carId = (await pool.query(
+      `INSERT INTO vehicles (entity_type, plate, owner_character_id, status, trunk_inventory_id)
+       VALUES ('megaverse:buggy', 'RP-POL1', $1, 'garaged', NULL) RETURNING id`,
+      [charN]
+    )).rows[0].id;
+    void carId;
+    const vLookup = await bridgeJson("/bridge/police/lookup/vehicle", {
+      playerId: "p-O", actorName: "Officer", actorPersistentId: "p-O", plate: "RP-POL1",
+    });
+    assert.equal(vLookup.ok, true);
+    assert.equal(vLookup.vehicle.plate, "RP-POL1");
+    assert.equal(vLookup.vehicle.ownerName, "Nate");
+    assert.equal((await bridgePost("/bridge/police/lookup/vehicle", {
+      playerId: "p-O", actorName: "Officer", actorPersistentId: "p-O", plate: "NOPE",
+    })).status, 404);
+
+    // --- licenses: issue (active) / duplicate blocked / suspend / revoke
+    const lic = await bridgeJson("/bridge/police/license", {
+      playerId: "p-O", actorName: "Officer", actorPersistentId: "p-O",
+      targetPersistentId: "p-N", targetName: "Nate", action: "issue", licenseType: "driving", notes: null,
+    });
+    assert.equal(lic.ok, true);
+    assert.equal(lic.license.licenseType, "driving");
+    assert.equal(lic.license.status, "valid");
+    assert.equal((await bridgePost("/bridge/police/license", {
+      playerId: "p-O", actorName: "Officer", actorPersistentId: "p-O",
+      targetPersistentId: "p-N", targetName: "Nate", action: "issue", licenseType: "driving", notes: null,
+    })).status, 409, "one active license per type");
+    assert.equal((await bridgeJson("/bridge/police/license", {
+      playerId: "p-O", actorName: "Officer", actorPersistentId: "p-O",
+      targetPersistentId: "p-N", targetName: "Nate", action: "suspend", licenseType: "driving", notes: "test",
+    })).license.status, "suspended");
+    assert.equal((await bridgeJson("/bridge/police/license", {
+      playerId: "p-O", actorName: "Officer", actorPersistentId: "p-O",
+      targetPersistentId: "p-N", targetName: "Nate", action: "revoke", licenseType: "driving", notes: null,
+    })).license.status, "revoked");
+    const meN = await bridgeJson("/bridge/police/me", { playerId: "p-N" });
+    assert.ok(meN.mine.licenses.every((l: any) => l.licenseType !== "driving" || l.status !== "valid"));
+
+    // --- fines: issue (no money), citizen pays via bridge = money sink
+    assert.equal((await bridgePost("/bridge/police/fine", {
+      playerId: "p-O", actorName: "Officer", actorPersistentId: "p-O",
+      targetPersistentId: "p-N", targetName: "Nate", amountCents: 50000, currency: "cash", reason: "ค่าปรับจราจร",
+    })).status, 200);
+    const finesBefore = await bridgeJson("/bridge/police/me", { playerId: "p-N" });
+    const unpaid = finesBefore.mine.fines.find((f: any) => f.status === "outstanding");
+    assert.ok(unpaid, "fine is outstanding");
+    assert.equal(await cashOf(charN), 150000, "fine issuance does not move money");
+    const paid = await bridgeJson("/bridge/police/fine/pay", { playerId: "p-N", fineId: unpaid.id });
+    assert.equal(paid.ok, true);
+    assert.equal(paid.fine.status, "paid");
+    assert.equal(await cashOf(charN), 100000, "paying a fine debits the exact cash (money sink)");
+    assert.equal(await ledgerRef(charN, "fine"), 1, "ledger keeps a 'fine' ref row");
+    assert.equal((await bridgePost("/bridge/police/fine/pay", { playerId: "p-N", fineId: unpaid.id })).status, 409, "double-pay blocked");
+
+    // citizen cannot pay someone else's fine
+    await bridgeJson("/bridge/police/fine", {
+      playerId: "p-O", actorName: "Officer", actorPersistentId: "p-O",
+      targetPersistentId: "p-N", targetName: "Nate", amountCents: 10000, currency: "cash", reason: "อีกค่าปรับ",
+    });
+    const secondUnpaid = (await bridgeJson("/bridge/police/me", { playerId: "p-N" })).mine.fines.find((f: any) => f.status === "outstanding");
+    assert.equal((await bridgePost("/bridge/police/fine/pay", { playerId: "p-O", fineId: secondUnpaid.id })).status, 403, "only the target pays");
+
+    // web player route also pays
+    const webFine = await bridgeJson("/bridge/police/fine", {
+      playerId: "p-O", actorName: "Officer", actorPersistentId: "p-O",
+      targetPersistentId: "p-N", targetName: "Nate", amountCents: 20000, currency: "cash", reason: "web pay",
+    });
+    assert.equal((await postAs(`/character/fines/${webFine.fine.id}/pay`, {}, tokenN)).status, 200);
+    const webState = await (await getAs("/character/police", tokenN)).json();
+    assert.ok(webState.police.fines.every((f: any) => f.status !== "outstanding" || f.id !== webFine.fine.id));
+
+    // --- warrants: issue by officer, non-senior cannot revoke, admin can
+    const warr = await bridgeJson("/bridge/police/warrant", {
+      playerId: "p-O", actorName: "Officer", actorPersistentId: "p-O",
+      targetPersistentId: "p-N", targetName: "Nate", warrantType: "arrest", reason: "กำลังสืบสวน", minutes: 600,
+    });
+    assert.equal(warr.ok, true);
+    assert.equal(warr.warrant.status, "active");
+    assert.equal((await bridgePost("/bridge/police/warrant/revoke", {
+      playerId: "p-O", actorName: "Officer", actorPersistentId: "p-O", warrantId: warr.warrant.id,
+    })).status, 403, "police.manage cannot revoke a warrant");
+    const adminRevoke = await (await postAs(`/admin/police/warrants/${warr.warrant.id}/revoke`, {}, ctx.tokenA)).json();
+    assert.equal(adminRevoke.warrant.status, "revoked");
+    const meW = await bridgeJson("/bridge/police/me", { playerId: "p-N" });
+    assert.equal(meW.mine.warrants.length, 0, "revoked warrant not active anymore");
+
+    // --- reports + evidence
+    const rep = await bridgeJson("/bridge/police/report", {
+      playerId: "p-O", actorName: "Officer", actorPersistentId: "p-O",
+      title: "ตรวจพบความผิด", body: "พบการกระทำความผิดในพื้นที่ ตรวจสอบแล้ว", classification: "restricted",
+    });
+    assert.equal(rep.ok, true);
+    assert.equal(rep.report.status, "open");
+    const ev = await bridgeJson("/bridge/police/evidence", {
+      playerId: "p-O", actorName: "Officer", actorPersistentId: "p-O",
+      reportId: rep.report.id, description: "กล้องวงจรปิดจุดเกิดเหตุ", itemId: null, quantity: 1,
+    });
+    assert.equal(ev.ok, true);
+    const closed = await bridgeJson("/bridge/police/report/close", {
+      playerId: "p-O", actorName: "Officer", actorPersistentId: "p-O", reportId: rep.report.id,
+    });
+    assert.equal(closed.ok, true);
+    assert.equal(closed.report.status, "closed");
+
+    // --- arrest / jail / early release
+    const arrest = await bridgeJson("/bridge/police/arrest", {
+      playerId: "p-O", actorName: "Officer", actorPersistentId: "p-O",
+      targetPersistentId: "p-N", targetName: "Nate", reason: "ละเมิดกฎ", minutes: 30,
+    });
+    assert.equal(arrest.ok, true);
+    assert.equal(arrest.arrest.status, "active");
+    assert.equal((await bridgePost("/bridge/police/arrest", {
+      playerId: "p-O", actorName: "Officer", actorPersistentId: "p-O",
+      targetPersistentId: "p-N", targetName: "Nate", reason: "ซ้ำ", minutes: 30,
+    })).status, 409, "already in jail");
+    const meJail = await bridgeJson("/bridge/police/me", { playerId: "p-N" });
+    assert.equal(meJail.mine.arrest.status, "active");
+    const released = await bridgeJson("/bridge/police/release", {
+      playerId: "p-O", actorName: "Officer", actorPersistentId: "p-O",
+      targetPersistentId: "p-N", targetName: "Nate",
+    });
+    assert.equal(released.ok, true);
+    assert.equal(released.arrest.status, "released");
+    assert.equal((await bridgeJson("/bridge/police/me", { playerId: "p-N" })).mine.arrest, null);
+
+    // --- record update
+    const rec = await bridgeJson("/bridge/police/record", {
+      playerId: "p-O", actorName: "Officer", actorPersistentId: "p-O",
+      targetPersistentId: "p-N", targetName: "Nate", alias: "นัท", threatLevel: "high", notes: "ติดตามต่อ",
+    });
+    assert.equal(rec.ok, true);
+    assert.equal(rec.record.threatLevel, "high");
+    assert.equal(rec.record.knownAlias, "นัท");
+
+    // --- admin web surfaces
+    const citizens = await (await getAs("/admin/police/citizens?query=Nate", ctx.tokenA)).json();
+    assert.ok(citizens.citizens.some((c: any) => Number(c.id) === charN && c.threatLevel === "high"));
+    const paidFines = await (await getAs("/admin/police/fines?status=paid", ctx.tokenA)).json();
+    assert.ok(paidFines.fines.length >= 2);
+    const warrantsList = await (await getAs("/admin/police/warrants?status=revoked", ctx.tokenA)).json();
+    assert.ok(warrantsList.warrants.some((w: any) => w.id === warr.warrant.id));
+    const reportsList = await (await getAs("/admin/police/reports?status=closed", ctx.tokenA)).json();
+    assert.ok(reportsList.reports.some((r: any) => r.id === rep.report.id));
+    const arrestsList = await (await getAs("/admin/police/arrests?status=released", ctx.tokenA)).json();
+    assert.ok(arrestsList.arrests.some((a: any) => a.id === arrest.arrest.id));
+    // non-police user cannot hit the admin surface
+    assert.equal((await getAs("/admin/police/citizens", tokenN)).status, 403);
+    // senior-only: officer (police.manage) cannot early-release via admin
+    assert.equal((await postAs("/admin/police/release", { characterId: charN }, tokenO)).status, 403);
+    // admin can issue a fresh arrest + release via admin routes
+    const adminArrest = await (await postAs("/admin/police/arrests", { characterId: charN, reason: "เทสต์ admin", minutes: 10 }, ctx.tokenA)).json();
+    assert.equal(adminArrest.arrest.status, "active");
+    assert.equal((await postAs("/admin/police/release", { characterId: charN }, ctx.tokenA)).status, 200);
+
+    // every mutation wrote an audit row
+    const audits = await pool.query(`SELECT action, COUNT(*)::int AS n FROM audit_log WHERE target_type IN ('license','fine','warrant','report','evidence','arrest','character') GROUP BY action`);
+    const byAction = Object.fromEntries(audits.rows.map((a: any) => [a.action, a.n]));
+    for (const action of [
+      "police.record", "police.fine.issue", "police.fine.pay",
+      "police.warrant.issue", "police.warrant.revoke", "police.report.create",
+      "police.report.close", "police.evidence.add", "police.arrest.issue", "police.arrest.release",
+    ]) {
+      assert.ok((byAction[action] ?? 0) >= 1, `expected audit rows for ${action}`);
+    }
+    assert.ok(Object.keys(byAction).some((a) => a.startsWith("police.license.")), "expected police.license.* audit rows");
   });
 
   // cleanup

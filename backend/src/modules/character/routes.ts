@@ -21,6 +21,7 @@ import { getWalletAndHistory } from "../economy/index.js";
 import { getGarageSummary as getVehicleGarage } from "../vehicle/index.js";
 import { getPropertySummary } from "../property/index.js";
 import { createCase } from "../cases/index.js";
+import * as police from "../police/index.js";
 
 export const characterRouter = Router();
 
@@ -250,4 +251,44 @@ characterRouter.get("/properties", async (req, res) => {
 
   const summary = await getPropertySummary(rows[0].id);
   res.json({ characterId: rows[0].id, ...summary });
+});
+
+/** GET /character/police — own character's civil state (fines/warrants/licenses/jail). */
+characterRouter.get("/police", async (req, res) => {
+  const userId = requireUserId(req, res);
+  if (userId === null) return;
+
+  const { rows } = await pool.query(
+    `SELECT id FROM characters WHERE user_id = $1 AND is_deleted = false`,
+    [userId]
+  );
+  if (rows.length === 0) return res.status(404).json({ error: "no character found for this user" });
+
+  const mine = await police.getMineState(rows[0].id);
+  res.json({ characterId: rows[0].id, police: mine });
+});
+
+/** POST /character/fines/:id/pay — pay an outstanding fine (money sink). */
+characterRouter.post("/fines/:id/pay", async (req, res) => {
+  const userId = requireUserId(req, res);
+  if (userId === null) return;
+  const fineId = Number(req.params.id);
+  if (!Number.isInteger(fineId) || fineId <= 0) {
+    return res.status(400).json({ error: "fine id must be a positive integer" });
+  }
+  const { rows } = await pool.query(
+    `SELECT id FROM characters WHERE user_id = $1 AND is_deleted = false`,
+    [userId]
+  );
+  if (rows.length === 0) return res.status(404).json({ error: "no character found for this user" });
+
+  try {
+    const fine = await police.payFine({ fineId, characterId: Number(rows[0].id), actorUserId: userId, requestId: null });
+    res.json({ characterId: rows[0].id, fine });
+  } catch (err: any) {
+    if (err instanceof police.FineNotFoundError) return res.status(404).json({ error: err.message });
+    if (err instanceof police.FineAccessDeniedError) return res.status(403).json({ error: err.message });
+    if (err instanceof police.FineAlreadyPaidError) return res.status(409).json({ error: err.message });
+    return res.status(400).json({ error: err && err.message ? err.message : "payment failed" });
+  }
 });

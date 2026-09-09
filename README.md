@@ -53,15 +53,28 @@ audit-logged. Built per `docs/MASTER_PROMPT.md`.
   player-to-player listing/sale/unlist, free transfer, staff grant/seize/delete.
   Bridge `/bridge/property/*` and admin `/admin/properties/*` routes; in-game
   menu is `!house` / `!property`.
+- **Police / MDT**: player-operated police department (`backend/src/modules/police/`)
+  — citizen + vehicle records (known alias, threat level), licenses
+  (driving/weapon/business/fishing/aviation, one valid per citizen+type), fines as
+  a deliberate money sink (paid via economy debit — money leaves circulation),
+  arrest/search warrants (revoke is senior-only), reports with evidence
+  attachments, and arrest → jail (1–1440 min, `jailed_until`, one active per
+  citizen). Officer actions go through the signed bridge `/bridge/police/*`; the
+  backend checks the actor's police role server-side (denied attempts land as HIGH
+  `staff_command_forbidden` security events) and audits every write. Admin
+  `/admin/police/*` routes + a web MDT tab; citizens see their own state
+  (`GET /character/police`) and pay fines in the player panel or in-game
+  (`!police`/`!mdt`).
 - **Admin surface**: audit-log viewer (`GET /admin/audit`, incl. `before/after/reason`),
   multi-currency economy reads (`GET /admin/economy/character/:id`), container CRUD,
   character update/view (locked-field approval path).
 
 Integration suite (`backend/src/test/integration.test.ts`) runs against a throwaway
-`bedrock_rp_test` DB (26 tests: auth, character create/link/delete/details-lock-case,
+`bedrock_rp_test` DB (27 tests: auth, character create/link/delete/details-lock-case,
 bridge secret/signature/replay, presence + stale-heartbeat, RBAC, economy
 cash/bank/red-money/anomaly/idempotency, inventory weight + containers, cases,
-security events, vehicles full lifecycle, properties full lifecycle).
+security events, vehicles full lifecycle, properties full lifecycle, police
+lifecycle).
 Spec: `npm run migrate`, `npm run build`, `npm test` (needs `ops` docker stack up).
 
 **Not locked yet** — do not assume:
@@ -225,6 +238,10 @@ Tabs:
 - **Audit** — action-filtered audit log
 - **Security** — severity/unacknowledged filter, ack on double-click
 - **Roles** — role list with permissions, grant/revoke by user id
+- **ตำรวจ** — MDT: citizen search (threat level / licenses / warrants /
+  fines), per-citizen actions (license issue/suspend/revoke, fine issue+pay,
+  warrant issue/revoke, arrest/release, record update), and
+  fines/warrants/reports/arrests lists
 
 It's mounted *before* the rate-limited admin router in `app.ts`
 (`/admin` assets bypass the 60/min limiter; the data calls underneath still
@@ -291,13 +308,43 @@ and is recorded as a HIGH `staff_command_forbidden` security event.
 Self-grants are allowed: the same RBAC + audit rules that govern
 `/admin/economy/grant` apply, so staff can fund their own character.
 
+## Police / MDT
+
+Officers use `!police` / `!mdt` in-game. All commands run through the signed
+bridge channel under `/bridge/police/*` and the backend re-checks the *actor's*
+police permission (`police.view`/`police.manage`/`police.admin`) server-side —
+the pack is never trusted. Denied attempts → `403` + a HIGH
+`staff_command_forbidden` security event.
+
+- Officer: lookup a citizen (record / licenses / fines / warrants / arrest),
+  lookup a vehicle by plate, then from the citizen hub issue/suspend/revoke a
+  license, issue a fine, issue (manage) / revoke (admin-only) a warrant,
+  arrest (auto-executes an open arrest warrant) / release, and update the
+  threat-level record.
+- Citizen: `!police` shows your own licenses / fines (with pay) / warrants /
+  arrest status; the player web ("ตำรวจ" card, `POST /character/fines/:id/pay`)
+  works too.
+- Fines are a money sink: `payFine` debits the citizen (economy debit,
+  `refType='fine'`), the cash leaves circulation, and the fine row is locked so
+  a double-pay can't race (409).
+- Arrest/jail is server-authoritative (`jailed_until`); v1 enforcement
+  teleports a still-jailed player to jail on spawn/join — a player already in
+  the world keeps playing until the next spawn (documented limitation).
+  `PRISON_SPAWN` in `behavior_pack/scripts/police_ui.js` is a placeholder.
+
+Admin MDT: `/admin/police/*` routes + the "ตำรวจ" web tab (reads `police.view`,
+writes `police.manage`, warrant revoke + early release `police.admin`).
+
 ## Roles & permissions
 
 `005_seed_permissions.sql` seeds four permission keys
 (`economy.grant`, `character.whitelist`, `inventory.give`,
 `inventory.remove`) and grants all of them to the `admin` role,
-`character.whitelist` only to `moderator`. `owner` bypasses RBAC checks
-entirely regardless of grants (see `rbac/index.ts`).
+`character.whitelist` only to `moderator`. `027_police.sql` adds
+`police.view` / `police.manage` / `police.admin` (granted to the `admin`
+role, and `police.view`+`police.manage` to a new rank-5 `police` role for
+field officers). `owner` bypasses RBAC checks entirely regardless of grants
+(see `rbac/index.ts`).
 
 - `POST /admin/roles/grant` `{userId, roleName}` — assign a role to a user
 - `POST /admin/roles/revoke` `{userId, roleName}` — remove a role from a user

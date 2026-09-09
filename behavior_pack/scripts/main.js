@@ -12,6 +12,7 @@ import {
   reconcileVehicleBoot,
 } from "./vehicle_ui.js";
 import { tryOpenPropertyUi } from "./property_ui.js";
+import { tryOpenPoliceUi, tryPoliceSpawnEnforcement } from "./police_ui.js";
 
 /**
  * IDENTITY NOTE: `world.afterEvents.playerJoin`'s `event.playerId` is
@@ -228,6 +229,17 @@ world.beforeEvents.chatSend.subscribe((event) => {
     return;
   }
 
+  // In-game police system (`!police` / `!mdt`).
+  if (tryOpenPoliceUi(message, event.sender, {
+    postToBackend,
+    getPersistentId: () => persistentIdByName.get(event.sender.name),
+    getPersistentIdByName: (name) => persistentIdByName.get(name),
+    isConfigured: () => !!cachedBridgeConfig,
+  })) {
+    event.cancel = true; // never hit public chat
+    return;
+  }
+
   if (!lower.startsWith("!link ")) return;
 
   event.cancel = true; // never let this hit public chat, whether it succeeds or fails
@@ -284,6 +296,25 @@ world.afterEvents.playerSpawn.subscribe((event) => {
       isConfigured: () => !!cachedBridgeConfig,
     });
   }, 40); // ~2s after spawn
+});
+
+/**
+ * Jail enforcement: runs on EVERY spawn (initial join, death respawn, etc.).
+ * The backend decides who's serving time (server clock is authoritative); if
+ * so, the player is dragged back to the configured prison point.
+ */
+world.afterEvents.playerSpawn.subscribe((event) => {
+  if (!cachedBridgeConfig) return;
+  const persistentId = persistentIdByName.get(event.player.name);
+  if (!persistentId) return;
+  system.runTimeout(() => {
+    tryPoliceSpawnEnforcement(event.player, {
+      postToBackend,
+      getPersistentId: () => persistentId,
+      getPersistentIdByName: (name) => persistentIdByName.get(name),
+      isConfigured: () => !!cachedBridgeConfig,
+    });
+  }, 40); // ~2s after spawn, after the join prompt
 });
 
 /**

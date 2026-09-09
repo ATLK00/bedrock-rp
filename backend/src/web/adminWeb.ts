@@ -110,10 +110,10 @@ const APP_JS = `
     return;
   }
 
-  var TABS = ["overview", "users", "characters", "shop", "cases", "audit", "security", "roles", "vehicles", "properties"];
+  var TABS = ["overview", "users", "characters", "shop", "cases", "audit", "security", "roles", "vehicles", "properties", "police"];
   var LABELS = { overview: "ภาพรวม", users: "ผู้เล่น", characters: "ตัวละคร",
     shop: "ร้านค้า", cases: "เคส", audit: "Audit", security: "Security", roles: "Roles", vehicles: "รถยนต์",
-    properties: "อสังหาริมทรัพย์" };
+    properties: "อสังหาริมทรัพย์", police: "ตำรวจ" };
 
   function el(html) {
     var d = document.createElement("div");
@@ -180,7 +180,7 @@ const APP_JS = `
       overview: renderOverview, users: renderUsers, characters: renderCharacters,
       shop: renderShop, cases: renderCases, audit: renderAudit,
       security: renderSecurity, roles: renderRoles, vehicles: renderVehicles,
-      properties: renderProperties,
+      properties: renderProperties, police: renderPolice,
     };
     renderers[name](page);
   }
@@ -863,6 +863,252 @@ const APP_JS = `
       }
     });
     loadList();
+  }
+
+  // ------------------------------------------------ police (MDT)
+  function renderPolice(page) {
+    page.innerHTML = "";
+    page.appendChild(el(
+      "<div class=\\"card\\"><h2>MDT — ประชาชน</h2>" +
+      "<div class=\\"row\\"><input id=\\"pdx-q\\" placeholder=\\"ค้นหา ชื่อ / citizenId\\">" +
+      "<button id=\\"pdx-go\\" class=\\"btn primary\\">ค้นหา</button></div>" +
+      "<div id=\\"pdx-res\\"><p class=\\"muted\\">พิมพ์แล้วกดค้นหา</p></div></div>"
+    ));
+    page.appendChild(el(
+      "<div class=\\"card\\"><h2>ค่าปรับ (Fines)</h2>" +
+      "<div class=\\"row\\"><select id=\\"f-status\\"><option value=\\"outstanding\\">outstanding</option><option value=\\"paid\\">paid</option><option value=\\"\\">ทั้งหมด</option></select>" +
+      "<button id=\\"f-refresh\\" class=\\"btn\\">Refresh</button><span class=\\"muted\\">เงินที่จ่ายจะหายจากระบบ (money sink)</span></div>" +
+      "<div id=\\"fres\\"><p class=\\"muted\\">กำลังโหลด…</p></div></div>"
+    ));
+    page.appendChild(el(
+      "<div class=\\"card\\"><h2>หมายศาล (Warrants)</h2>" +
+      "<div class=\\"row\\"><select id=\\"w-status\\"><option value=\\"active\\">active</option><option value=\\"\\">ทั้งหมด</option></select>" +
+      "<button id=\\"w-refresh\\" class=\\"btn\\">Refresh</button></div>" +
+      "<div id=\\"wres\\"><p class=\\"muted\\">กำลังโหลด…</p></div></div>"
+    ));
+    page.appendChild(el(
+      "<div class=\\"card\\"><h2>ผู้ต้องขัง (Arrests)</h2>" +
+      "<div class=\\"row\\"><button id=\\"a-refresh\\" class=\\"btn\\">Refresh</button></div>" +
+      "<div id=\\"ares\\"><p class=\\"muted\\">กำลังโหลด…</p></div></div>"
+    ));
+    page.appendChild(el(
+      "<div class=\\"card\\"><h2>รายงาน (Reports)</h2>" +
+      "<div class=\\"row\\"><select id=\\"r-status\\"><option value=\\"open\\">open</option><option value=\\"closed\\">closed</option><option value=\\"\\">ทั้งหมด</option></select>" +
+      "<button id=\\"r-refresh\\" class=\\"btn\\">Refresh</button></div>" +
+      "<div id=\\"rres\\"><p class=\\"muted\\">กำลังโหลด…</p></div></div>"
+    ));
+
+    function mdAction(endpoint, body) {
+      return api(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body || {}),
+      }).then(function (r) {
+        toast(r.ok ? "ok" : ((r.data && (r.data.error || r.data.message)) || "fail"));
+        return r;
+      });
+    }
+
+    function loadCitizens() {
+      var v = page.querySelector("#pdx-q").value.trim();
+      var out = page.querySelector("#pdx-res");
+      out.innerHTML = "<p class=\\"muted\\">กำลังโหลด…</p>";
+      api("/admin/police/citizens" + (v ? "?query=" + encodeURIComponent(v) : "")).then(function (r) {
+        if (!r.ok) { out.innerHTML = errBox((r.data && (r.data.error || r.data.message)) || "failed"); return; }
+        var rows = (r.data.citizens || []).map(function (c) {
+          return "<tr class=\\"clickable\\" data-cid=\\"" + c.id + "\\">" +
+            "<td>" + esc(c.name) + "</td><td>" + esc(c.citizenId || "-") + "</td>" +
+            "<td>" + esc(c.persistentId || "-") + "</td>" +
+            "<td>" + esc(c.threatLevel) + "</td><td>" + c.licenseCount + "</td>" +
+            "<td>" + c.warrantCount + "</td><td>" + c.outstandingFineCount + "</td></tr>";
+        }).join("");
+        out.innerHTML = rows
+          ? "<table><tr><th>ชื่อ</th><th>citizenId</th><th>persistentId</th><th>ระดับ</th><th>บัตร</th><th>หมาย</th><th>ค่าปรับ</th></tr>" + rows + "</table>"
+          : "<p class=\\"muted\\">ไม่พบ</p>";
+        out.querySelectorAll("tr.clickable").forEach(function (tr) {
+          tr.addEventListener("click", function () { policeCitizenDialog(Number(tr.getAttribute("data-cid"))); });
+        });
+      });
+    }
+
+    function policeCitizenDialog(cid) {
+      api("/admin/police/citizens/" + cid).then(function (r) {
+        if (!r.ok) { toast((r.data && (r.data.error || r.data.message)) || "fail"); return; }
+        var c = r.data.citizen;
+        var lic = (c.licenses || []).map(function (l) { return l.licenseType + ":" + l.status; }).join(", ") || "-";
+        var fin = (c.fines || []).filter(function (x) { return x.status === "outstanding"; })
+          .map(function (x) { return "#" + x.id + " " + money(x.amountCents) + " " + x.currency; }).join(", ") || "-";
+        var war = (c.warrants || []).map(function (w) { return w.warrantType + ":" + w.status; }).join(", ") || "-";
+        var jail = c.arrest ? "อยู่ในคุก เหลือ " + c.arrest.minutesRemaining + " นาที" : "-";
+        var rec = c.record ? (c.record.alias ? "alias: " + c.record.alias + " " : "") + "ระดับ " + c.record.threatLevel : "ไม่มี record";
+        var pick = window.prompt(
+          "MDT: " + c.name + " (" + (c.citizenId || "ไม่มี id") + ")\\n" +
+          "เพศ " + esc(c.gender || "-") + " เกิด " + esc(c.dateOfBirth || "-") + "\\n" +
+          "บัตร: " + lic + "\\nค่าปรับ: " + fin + "\\nหมาย: " + war + "\\nคุก: " + jail + "\\n" + rec +
+          "\\n\\n[1] บัตร   [2] ค่าปรับ   [3] หมายจับ   [4] จับกุม   [5] ปล่อยตัว   [6] อัปเดต record   [esc] ยกเลิก", "6"
+        );
+        if (pick === null) return;
+        if (pick === "1") {
+          var lt = prompt("licenseType (driving/weapon/business/fishing/aviation):", "driving");
+          if (!lt) return;
+          var lo = prompt("action (issue/suspend/revoke):", "issue");
+          if (!lo) return;
+          var ln = prompt("หมายเหตุ (ว่างได้):", "");
+          mdAction("/admin/police/licenses", { characterId: cid, licenseType: lt, action: lo, notes: ln });
+        } else if (pick === "2") {
+          var fc = prompt("amountCents:", "50000");
+          if (!fc) return;
+          var cur = prompt("currency (cash/bank/red_money):", "cash");
+          if (!cur) return;
+          var fr = prompt("เหตุผล:", "ละเมิดกฎจราจร");
+          if (!fr) return;
+          mdAction("/admin/police/fines", { characterId: cid, amountCents: Number(fc), currency: cur, reason: fr }).then(function (resp) {
+            if (resp.ok && resp.data && resp.data.fine) {
+              mdAction("/admin/police/fines/" + resp.data.fine.id + "/pay", {});
+            }
+          });
+        } else if (pick === "3") {
+          var wt = prompt("warrantType (arrest/search):", "arrest");
+          if (!wt) return;
+          var wr = prompt("เหตุผล:", "");
+          if (!wr) return;
+          var wm = prompt("หมดอายุภายในกี่นาที (ว่าง = ไม่จำกัด):", "");
+          var wbody = { characterId: cid, warrantType: wt, reason: wr };
+          if (wm && wm.trim() !== "") wbody.minutes = Number(wm);
+          mdAction("/admin/police/warrants", wbody);
+        } else if (pick === "4") {
+          var ar = prompt("เหตุผลจับกุม:", "");
+          if (!ar) return;
+          var am = prompt("จำคุกกี่นาที (1-1440):", "120");
+          if (!am) return;
+          mdAction("/admin/police/arrests", { characterId: cid, reason: ar, minutes: Number(am) });
+        } else if (pick === "5") {
+          if (!confirm("ปล่อยตัว " + c.name + " ก่อนครบกำหนด จริง ๆ เหรอ?")) return;
+          mdAction("/admin/police/release", { characterId: cid });
+        } else if (pick === "6") {
+          var al = prompt("alias (ว่าง = คงเดิม):", "");
+          var th = prompt("threatLevel (none/low/medium/high/critical):", "none");
+          var nt = prompt("notes (ว่าง = คงเดิม):", "");
+          var rbody = { characterId: cid };
+          if (al && al.trim() !== "") rbody.alias = al;
+          if (th) rbody.threatLevel = th;
+          if (nt && nt.trim() !== "") rbody.notes = nt;
+          mdAction("/admin/police/records", rbody);
+        }
+      });
+    }
+
+    function statTag(s) {
+      if (s === "paid" || s === "closed" || s === "served" || s === "released") return '<span class="tag ok">' + esc(s) + "</span>";
+      if (s === "outstanding" || s === "active" || s === "open") return '<span class="tag warn">' + esc(s) + "</span>";
+      return '<span class="tag neutral">' + esc(s) + "</span>";
+    }
+
+    function loadFines() {
+      var out = page.querySelector("#fres");
+      var st = page.querySelector("#f-status").value;
+      api("/admin/police/fines?status=" + encodeURIComponent(st)).then(function (r) {
+        if (!r.ok) { out.innerHTML = errBox((r.data && (r.data.error || r.data.message)) || "failed"); return; }
+        var rows = (r.data.fines || []).map(function (f) {
+          return "<tr><td>#" + f.id + "</td><td>" + esc(f.officerName || "—") + "</td>" +
+            "<td>" + money(f.amountCents) + " " + esc(f.currency) + "</td>" +
+            "<td>" + esc(f.reason) + "</td><td>" + statTag(f.status) + "</td>" +
+            "<td>" + fmtDate(f.issuedAt) + "</td>" +
+            (f.status === "outstanding"
+              ? "<td><button class=\\"btn small primary\\" data-fpay=\\"" + f.id + "\\">จ่ายแทน</button></td>"
+              : "<td>-</td>") + "</tr>";
+        }).join("");
+        out.innerHTML = rows
+          ? "<table><tr><th>#</th><th>เจ้าหน้าที่</th><th>มูลค่า</th><th>เหตุผล</th><th>สถานะ</th><th>ออกเมื่อ</th><th></th></tr>" + rows + "</table>"
+          : "<p class=\\"muted\\">ไม่มีค่าปรับ</p>";
+      });
+    }
+    page.querySelector("#f-refresh").addEventListener("click", loadFines);
+    page.querySelector("#f-status").addEventListener("change", loadFines);
+    page.querySelector("#fres").addEventListener("click", function (e) {
+      var t = e.target;
+      var id = t.getAttribute && t.getAttribute("data-fpay");
+      if (!id) return;
+      if (!confirm("จ่ายค่าปรับ #" + id + " แทนผู้ต้องขัง (เงินหายจากระบบ)? ")) return;
+      mdAction("/admin/police/fines/" + id + "/pay", {}).then(loadFines);
+    });
+
+    function loadWarrants() {
+      var out = page.querySelector("#wres");
+      var st = page.querySelector("#w-status").value;
+      api("/admin/police/warrants?status=" + encodeURIComponent(st)).then(function (r) {
+        if (!r.ok) { out.innerHTML = errBox((r.data && (r.data.error || r.data.message)) || "failed"); return; }
+        var rows = (r.data.warrants || []).map(function (w) {
+          return "<tr><td>#" + w.id + "</td><td>" + esc(w.targetName || "#" + w.targetCharacterId) + "</td>" +
+            "<td>" + esc(w.warrantType) + "</td><td>" + esc(w.reason) + "</td>" +
+            "<td>" + statTag(w.status) + "</td>" + "<td>" + fmtDate(w.expiresAt) + "</td>" +
+            (w.status === "active"
+              ? "<td><button class=\\"btn small danger\\" data-wrev=\\"" + w.id + "\\">เพิกถอน</button></td>"
+              : "<td>-</td>") + "</tr>";
+        }).join("");
+        out.innerHTML = rows
+          ? "<table><tr><th>#</th><th>เป้าหมาย</th><th>ประเภท</th><th>เหตุผล</th><th>สถานะ</th><th>หมดอายุ</th><th></th></tr>" + rows + "</table>"
+          : "<p class=\\"muted\\">ไม่มีหมายศาล</p>";
+      });
+    }
+    page.querySelector("#w-refresh").addEventListener("click", loadWarrants);
+    page.querySelector("#w-status").addEventListener("change", loadWarrants);
+    page.querySelector("#wres").addEventListener("click", function (e) {
+      var t = e.target;
+      var id = t.getAttribute && t.getAttribute("data-wrev");
+      if (!id) return;
+      if (!confirm("เพิกถอนหมาย #" + id + " จริง ๆ เหรอ? (ต้องเป็น senior) ")) return;
+      mdAction("/admin/police/warrants/" + id + "/revoke", {}).then(loadWarrants);
+    });
+
+    function loadArrests() {
+      var out = page.querySelector("#ares");
+      api("/admin/police/arrests?status=active").then(function (r) {
+        if (!r.ok) { out.innerHTML = errBox((r.data && (r.data.error || r.data.message)) || "failed"); return; }
+        var rows = (r.data.arrests || []).map(function (a) {
+          return "<tr><td>#" + a.id + "</td><td>" + esc(a.characterName || "#" + a.characterId) + "</td>" +
+            "<td>" + esc(a.reason) + "</td><td>" + (a.minutesRemaining != null ? a.minutesRemaining : "-") + " นาที</td>" +
+            "<td>" + fmtDate(a.jailUntil) + "</td>" + "<td>" + statTag(a.status) + "</td>" +
+            "<td><button class=\\"btn small primary\\" data-arel=\\"" + a.characterId + "\\">ปล่อยตัว</button></td></tr>";
+        }).join("");
+        out.innerHTML = rows
+          ? "<table><tr><th>#</th><th>ตัวละคร</th><th>เหตุผล</th><th>เหลือ</th><th>ครบกำหนด</th><th>สถานะ</th><th></th></tr>" + rows + "</table>"
+          : "<p class=\\"muted\\">ไม่มีผู้ต้องขัง</p>";
+      });
+    }
+    page.querySelector("#a-refresh").addEventListener("click", loadArrests);
+    page.querySelector("#ares").addEventListener("click", function (e) {
+      var t = e.target;
+      var cid = t.getAttribute && t.getAttribute("data-arel");
+      if (!cid) return;
+      if (!confirm("ปล่อยตัวรุกก่อนครบกำหนด จริง ๆ เหรอ?")) return;
+      mdAction("/admin/police/release", { characterId: Number(cid) }).then(loadArrests);
+    });
+
+    function loadReports() {
+      var out = page.querySelector("#rres");
+      var st = page.querySelector("#r-status").value;
+      api("/admin/police/reports?status=" + encodeURIComponent(st)).then(function (r) {
+        if (!r.ok) { out.innerHTML = errBox((r.data && (r.data.error || r.data.message)) || "failed"); return; }
+        var rows = (r.data.reports || []).map(function (re) {
+          return "<tr><td>#" + re.id + "</td><td>" + esc(re.title) + "</td>" +
+            "<td>" + esc(re.classification) + "</td><td>" + statTag(re.status) + "</td>" +
+            "<td>" + fmtDate(re.createdAt) + "</td></tr>";
+        }).join("");
+        out.innerHTML = rows
+          ? "<table><tr><th>#</th><th>หัวเรื่อง</th><th>ชั้นความลับ</th><th>สถานะ</th><th>เขียนเมื่อ</th></tr>" + rows + "</table>"
+          : "<p class=\\"muted\\">ไม่มีรายงาน</p>";
+      });
+    }
+    page.querySelector("#r-refresh").addEventListener("click", loadReports);
+    page.querySelector("#r-status").addEventListener("change", loadReports);
+
+    page.querySelector("#pdx-go").addEventListener("click", loadCitizens);
+    page.querySelector("#pdx-q").addEventListener("keydown", function (e) { if (e.key === "Enter") loadCitizens(); });
+    loadFines();
+    loadWarrants();
+    loadArrests();
+    loadReports();
   }
 
   // ------------------------------------------------ boot
