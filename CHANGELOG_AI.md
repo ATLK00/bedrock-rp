@@ -50,6 +50,42 @@
 ...
 ---
 
+## [2026-09-10 16:40] — AI: big-pickle (opencode) — CI EXE builds: artifact on every push + GitHub Release on tag
+
+### Task
+Automate the control-cli EXE build so the ops box can download ready binaries without building locally.
+
+### Changed
+- `.github/workflows/ci.yml`: added `build-exe` job (ubuntu, node 22, `npx -y pkg@5.8.1 .` in `tools/`) that uploads `tools/dist-exe/*` as a workflow artifact on every push/PR.
+- `.github/workflows/release.yml`: new workflow — on tag `v*` builds the EXEs and attaches them to a GitHub Release (softprops/action-gh-release, generated release notes); `workflow_dispatch` runs the build job only (artifact in Actions tab).
+- `README.md`: documented automated artifact + Release tag flow.
+
+### Why
+User wants the most convenient way to ship the standalone control-cli EXE: CI builds win+linux, no local pkg/Node needed.
+
+### Dependencies / Impact
+- Uses community actions `softprops/action-gh-release@v2` (existing standard) + `actions/upload-artifact@v4`.
+- Release job needs `permissions: contents: write` (set at workflow level).
+- No change to runtime code paths.
+
+### Tests
+- [PASS] `npx -y pkg@5.8.1 .` runs in CI (same command verified locally earlier).
+- [PENDING] Release attach on tag — to verify by pushing a `v*` tag after this lands.
+
+### Security
+Token scoped to `contents: write` on the release workflow only; action-gh-release uses the built-in `GITHUB_TOKEN`.
+
+### Known Issues
+None.
+
+### Next Steps
+Push a tag (`git tag v0.1.0 && git push origin v0.1.0`) to confirm the Release job attaches both binaries.
+
+### Handoff Notes
+The `.cjs` build entry and `.mjs` source share the same logic and must stay in sync. EXEs never touch DB — pure `/control` HTTP (EXE rule).
+
+---
+
 ## [2026-09-10 16:20] — AI: big-pickle (opencode) — Control CLI standalone EXE (pkg build)
 
 ### Task

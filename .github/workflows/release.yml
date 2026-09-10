@@ -1,0 +1,60 @@
+name: Release control-cli EXE
+
+# Builds the standalone control-cli executables with vercel/pkg and attaches
+# them to a GitHub Release (softprops/action-gh-release).
+#
+# Triggered by:
+#   - pushing a tag (v*)          -> creates/updates a Release with the EXEs
+#   - manual workflow_dispatch    -> runs the build job only (no Release,
+#                                    artifacts stay in the Actions tab)
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-exe:
+    name: build control-cli EXE (pkg)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Build EXEs
+        working-directory: tools
+        run: npx -y pkg@5.8.1 .
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: control-cli-exe
+          path: tools/dist-exe/
+          if-no-files-found: error
+
+  release:
+    name: Attach to GitHub Release
+    needs: build-exe
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: control-cli-exe
+          path: dist-exe
+
+      - name: Create / update GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist-exe/*
+          generate_release_notes: true

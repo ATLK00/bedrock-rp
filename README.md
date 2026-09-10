@@ -363,8 +363,17 @@ Emits `tools/dist-exe/bedrock-rp-control-cli-win.exe` and
 `tools/control-cli.cjs` is the CommonJS entry pkg bundles; the build config lives
 in `tools/package.json` (`pkg.targets`: `node18-win-x64`, `node18-linux-x64`).
 The EXE reads the same `CTL_*` env vars and exits with the same codes as the
-`.mjs` form. `tools/dist-exe/` is git-ignored — rebuild on the box or ship the
-binaries via an artifact.
+`.mjs` form. `tools/dist-exe/` is git-ignored — but you don't need to build by
+hand: CI does it for you.
+
+Automated builds:
+- Every push runs the `build-exe` CI job (`ci.yml`) and uploads
+  `tools/dist-exe/*` as a **workflow artifact** (Actions → run → Artifacts) —
+  always fresh, no local toolchain needed.
+- Pushing a tag `v*` (e.g. `git tag v1.0 && git push origin v1.0`) triggers
+  `.github/workflows/release.yml`, which attaches `bedrock-rp-control-cli-win.exe`
+  and `bedrock-rp-control-cli-linux` to a **GitHub Release** with generated
+  release notes — the downloadable binaries for the ops box.
 
 ## Inventory
 
