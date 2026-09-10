@@ -50,6 +50,34 @@
 ...
 ---
 
+## [2026-09-10 19:25] — AI: big-pickle (opencode) — authLimiter: per-username bucket + skip successful logins
+
+### Task
+- หลังส่งมอบ desktop app ผู้ใช้ล็อกอินเจอ `too many auth attempts, try again later` — limiter เดิม key ต่อ IP 10 ครั้ง/15 นาที นับรวมทุก request (รวม login ที่สำเร็จ + Discord login/callback) แล้ว dev/IP เดียวกันโดนบล็อกทั้งกลุ่มจนหมดไอเดีย
+
+### Changed
+- `backend/src/middleware/rateLimit.ts`: authLimiter key เป็น `login:<username>` เมื่อ body มี username (ไม่โดน lock ข้ามกัน) ตกไป `ip:<ip>` สำหรับ /auth ที่ไม่มี username; `skipSuccessfulRequests: true` (login สำเร็จไม่กิน bucket); limit ยังคง 10/15 นาที ต่อ bucket
+
+### Why
+- กัน brute-force ต่อ account สลับ lock ตัว admin เอง / กัน NAT/IP เดียวมัดทุกคน เพราะ limiter เป็น in-memory restart = reset
+
+### Dependencies / Impact
+- ไม่มี migration; express-rate-limit v7 มี option เหล่านี้อยู่แล้ว
+- หลังแก้: failed เกิน limit ก็ 429 ที่ username ตัวนั้น 15 นาที (เดิม), แต่ login สำเร็จ/คนอื่นไม่โดนเด้ง
+
+### Tests
+- [PASS] `backend > npm run build`
+- [PASS] `backend > npm test` 36/36
+- [PASS] manual: RATE_LIMIT_AUTH_MAX=3 -> bad 3x=401, 4th=429, อีก username แยก bucket; live 8080 (tsx watch auto-restart): login correct=200, wrong=401
+
+### Security
+- brute-force ยังโดนจำกัด (failed เท่านั้น); ไม่มีสิทธิ์อ่าน key ต่อ IP*username เดิม
+
+### Known Issues
+- เมื่อ account ติด bucket เต็มแล้ว login ถูกก็ 429 จนครบ 15 นาที (ตั้งใจ, เหมือน policy เดิม)
+
+---
+
 ## [2026-09-10 19:00] — AI: big-pickle (opencode) — Local auth login + `/admin/ops` React-to-desktop-admin surface + Electron desktop app
 
 ### Task

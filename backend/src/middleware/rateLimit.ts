@@ -49,9 +49,25 @@ function tripHandler(severity: SecuritySeverity, tier: string, message: string) 
   };
 }
 
+/**
+ * authLimiter: login/callback — the classic brute-force/credential-stuffing
+ * surface. Bucketed per login username when the request carries one (so one
+ * account's failed guesses don't lock every admin behind the same IP / NAT),
+ * falling back to per-IP for /auth routes without a username (Discord OAuth).
+ * Successful logins never consume the bucket (`skipSuccessfulRequests`), so a
+ * legit admin typing a password slowly can't accidentally lock themselves out.
+ */
 export const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
   limit: config.RATE_LIMIT_AUTH_MAX,
+  keyGenerator: (req: Request) => {
+    const username = (req.body as Record<string, unknown> | undefined)?.username;
+    if (typeof username === "string" && username.trim().length > 0) {
+      return `login:${username.trim().toLowerCase()}`;
+    }
+    return `ip:${req.ip ?? "unknown"}`;
+  },
+  skipSuccessfulRequests: true,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: "too many auth attempts, try again later" },
