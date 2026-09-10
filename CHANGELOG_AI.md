@@ -50,6 +50,99 @@
 ...
 
 ---
+## [2026-09-10 07:24] — AI: big-pickle (opencode) — EMS / emergency services + Phone app stack
+
+### Task
+Roadmap: emergency medical services (health state machine + hospital money sink,
+medic UI) and the mobile/phone framework (per MASTER_PROMPT §20/§21) — both had
+been done in one pass as requested ("ทำทั้งEMSกับPhone เลยทีเดียวค่อยทดสอบพร้อมกัน").
+
+### Changed
+- `backend/migrations/028_ems.sql` (new) — `medical_records` (PK character;
+  health_state healthy/downed/treated/dead; downed_at/by/location, treated_at/by,
+  died_at/by, hospitalization_count, must_respawn_hospital) + `medical_bills`
+  (unpaid/paid/waived). Permissions `ems.view/manage/admin`; granted to `admin`
+  and (view+manage) to a new `ems` role.
+- `backend/migrations/029_phone.sql` (new) — `phone_numbers` (PK character,
+  deterministic `09`+8 backfill), `phone_contacts`, `phone_messages`,
+  `phone_calls` (ringing/connected/ended/missed state machine), `phone_waypoints`,
+  `phone_taxi_requests` (pending/accepted/completed/cancelled job board),
+  `phone_emergency_calls` (open/dispatched/closed 911 board). Permissions
+  `phone.view/manage/taxi.manage/emergency.view/emergency.manage`; admin gets all,
+  police+ems share the emergency-dispatch pair.
+- `backend/src/modules/ems/index.ts` (new) — `ensureMedicalRow`, `getMineMedicalState`,
+  `searchMedical` (citizen_id then name ILIKE), `reportDown`, `rescue`, `treat`,
+  `declareDeath`, `hospitalize` (returns `{ record, bill }`), `payBill`,
+  `listMedicalRecords`/`listBills`; lazy downed-expiry on read
+  (`EMS_DOWNED_EXPIRY_SECONDS`, 900s); bills are economy debits refType `medical`.
+- `backend/src/modules/phone/index.ts` (new) — number auto-issue,
+  contacts/messages/calls/bank(GPS-taxi-emergency modules above), audits `phone.*`,
+  error classes mapped by `phoneCall` (SelfActionError=400, rest mirror emsCall).
+- `backend/src/modules/bridge/index.ts` — `authorizeEmsActor` + 9 EMS routes
+  (incl. query-based `/ems/lookup`), 20+ phone routes, `emsCall`/`phoneCall`
+  mappers; `/ems/hospitalize` returns `{ record, bill }`.
+- `backend/src/modules/admin/index.ts` — `/admin/ems/*` (records/bills/waive/reset)
+  + `/admin/phone/*` (numbers/emergency/emergency/:id/close/taxi), enclosing
+  `emAdminError`/`phoneAdminError` + `phoneAdmin` re-exports.
+- `backend/src/modules/character/routes.ts` — `GET /character/medical` (+ bill
+  pay), `GET /character/phone`; characterId coerced to Number (bigint string).
+- `backend/src/eventbus/index.ts` — `PHONE_MEDICAL_CHANGED`, `PHONE_CALL_CHANGED`.
+- `backend/src/web/playerWeb.ts` — medical card (state + unpaid bills, inline pay)
+  + phone card; `backend/src/web/adminWeb.ts` — "หมอ" tab (records bias, bills
+  waive/reset) + "โทรศัพท์" tab (numbers/emergency/taxi).
+- `behavior_pack/scripts/ems_ui.js` (new) — `!ems`/`!medic` citizen root + medic
+  dossier/treat/declare-death (confirmDeath = type exact name) +
+  `tryEmsSpawnEnforcement` (teleport + hospitalize on spawn).
+- `behavior_pack/scripts/phone_ui.js` (new) — `!phone` app menu (contacts/
+  messages/calls/bank/GPS/taxi/emergency, business placeholder) +
+  `tryPhoneCallAlert`; wired into `main.js` (`entityDie` → `/bridge/ems/death`,
+  `playerSpawn` → spawn enforcement at 40 ticks).
+
+### Why
+User: "ทำทั้งEMSกับPhone เลยทีเดียวค่อยทดสอบพร้อมกัน" — build both before testing.
+Hospital bills + medical care give the economy a second sink (like fines), and the
+phone framework gives citizens a shared comms/call/taxi/911 layer with no realtime
+audio in Bedrock (calls are a data state machine; `PHONE_CALL_CHANGED` is the
+future voice-provider hook).
+
+### Tests
+- [PASS] `npm run build` clean in `backend/`.
+- [PASS] `npm test` — suite **29/29** (new "ems: …" + "phone: …" subtests covering
+  happy paths, RBAC denials + HIGH `staff_command_forbidden`, duplicate-action
+  409s, owner-scope 404s, money-movement asserts, admin + player-web surfaces,
+  and all `ems.*`/`phone.*` audit actions).
+
+### Security
+- Medics/operators are authorized by their own character→Discord user→RBAC chain
+  (`authorizeEmsActor`/`hasPermission`), never the pack. Denied staff commands
+  raise HIGH `staff_command_forbidden` security events (asserted).
+- Admin phone routes gated (`phone.view`/`phone.emergency.*`/`phone.taxi.manage`);
+  admin EMS gated (`ems.view`/`manage`/`admin`); non-operator gets 403 (asserted).
+- Bills/fares/transfers move real money only through `economy` (debit/transfer,
+  audited + ledgered, double-pay/locked rows).
+
+### Known Issues
+- `EMS_DOWNED_EXPIRY_SECONDS` (900s) — a player who crashes instead of dying
+  offline still expires to dead on next read; acceptable v1, documented.
+- `HOSPITAL_SPAWN` in `ems_ui.js` is the placeholder `{x:0,y:80,z:0}` overworld —
+  change to the real hospital point (like `PRISON_SPAWN`).
+- Phone calls are data-only (no voice). `RING_TIMEOUT_SECONDS` (60s) settles
+  ringing→missed lazily.
+- Personal bank transfers by phone number require the target to have used the
+  phone (number auto-issue) or have a backfilled number.
+
+### Next Steps
+- Live pass on BDS: grant the `ems` role, copy `ems_ui.js`/`phone_ui.js` and the
+  updated `main.js`, set the real `HOSPITAL_SPAWN`, then exercise `!medic` rescue/
+  treat/hospitalize and `!phone` calls/taxi/911 on a real client.
+- Consider voice/realtime attach later via `PHONE_CALL_CHANGED` events.
+
+### Handoff Notes
+- See `AI_HANDOFF.md` Round 11 for the full file map + the bugs the test wiring
+  caught (ms-offset remaining math, phone presence bigint-vs-number, 42P18 unused
+  param, `pn.id` ORDER BY, inbox read-mark ordering, hospitalize return shape).
+
+---
 ## [2026-09-10 00:37] — AI: big-pickle (opencode) — Police / MDT system (licenses, fines, warrants, reports, arrest-jail-release)
 
 ### Task

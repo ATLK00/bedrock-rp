@@ -110,10 +110,10 @@ const APP_JS = `
     return;
   }
 
-  var TABS = ["overview", "users", "characters", "shop", "cases", "audit", "security", "roles", "vehicles", "properties", "police"];
+  var TABS = ["overview", "users", "characters", "shop", "cases", "audit", "security", "roles", "vehicles", "properties", "police", "medical", "phone"];
   var LABELS = { overview: "ภาพรวม", users: "ผู้เล่น", characters: "ตัวละคร",
     shop: "ร้านค้า", cases: "เคส", audit: "Audit", security: "Security", roles: "Roles", vehicles: "รถยนต์",
-    properties: "อสังหาริมทรัพย์", police: "ตำรวจ" };
+    properties: "อสังหาริมทรัพย์", police: "ตำรวจ", medical: "EMS/การแพทย์", phone: "โทรศัพท์" };
 
   function el(html) {
     var d = document.createElement("div");
@@ -181,6 +181,7 @@ const APP_JS = `
       shop: renderShop, cases: renderCases, audit: renderAudit,
       security: renderSecurity, roles: renderRoles, vehicles: renderVehicles,
       properties: renderProperties, police: renderPolice,
+      medical: renderMedical, phone: renderPhone,
     };
     renderers[name](page);
   }
@@ -1109,6 +1110,227 @@ const APP_JS = `
     loadWarrants();
     loadArrests();
     loadReports();
+  }
+
+  // ------------------------------------------------ medical (EMS)
+  function renderMedical(page) {
+    page.innerHTML = "";
+    page.appendChild(el(
+      "<div class=\\"card\\"><h2>เวชระเบียน (records)</h2>" +
+      "<div class=\\"row\\"><input id=\\"m-q\\" placeholder=\\"ค้นหา ชื่อ / citizenId / persistentId\\">" +
+      "<button id=\\"m-go\\" class=\\"btn primary\\">ค้นหา</button></div>" +
+      "<div id=\\"mres\\"><p class=\\"muted\\">กำลังโหลด…</p></div></div>"
+    ));
+    page.appendChild(el(
+      "<div class=\\"card\\"><h2>ค่ารักษา (bills)</h2>" +
+      "<div class=\\"row\\"><select id=\\"mb-status\\"><option value=\\"unpaid\\">unpaid</option>" +
+      "<option>paid</option><option>waived</option><option value=\\"\\">ทั้งหมด</option></select>" +
+      "<button id=\\"mb-refresh\\" class=\\"btn\\">Refresh</button>" +
+      "<span class=\\"muted\\">จ่าย = เงินหายจากระบบ (money sink)</span></div>" +
+      "<div id=\\"mbres\\"><p class=\\"muted\\">กำลังโหลด…</p></div></div>"
+    ));
+
+    function healthTag(s) {
+      if (s === "healthy") return '<span class="tag ok">' + esc(s) + "</span>";
+      if (s === "dead") return '<span class="tag warn">' + esc(s) + "</span>";
+      return '<span class="tag neutral">' + esc(s) + "</span>";
+    }
+    function statusTag(s) {
+      if (s === "paid" || s === "closed" || s === "completed") return '<span class="tag ok">' + esc(s) + "</span>";
+      if (s === "unpaid" || s === "open" || s === "pending") return '<span class="tag warn">' + esc(s) + "</span>";
+      return '<span class="tag neutral">' + esc(s) + "</span>";
+    }
+
+    function medAction(endpoint, body) {
+      return api(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body || {}),
+      }).then(function (r) {
+        toast(r.ok ? "ok" : ((r.data && (r.data.error || r.data.message)) || "fail"));
+        return r;
+      });
+    }
+
+    function loadRecords() {
+      var v = page.querySelector("#m-q").value.trim();
+      var out = page.querySelector("#mres");
+      out.innerHTML = "<p class=\\"muted\\">กำลังโหลด…</p>";
+      api("/admin/ems/records" + (v ? "?query=" + encodeURIComponent(v) : "")).then(function (r) {
+        if (!r.ok) { out.innerHTML = errBox((r.data && (r.data.error || r.data.message)) || "failed"); return; }
+        var rows = (r.data.records || []).map(function (c) {
+          return "<tr><td><strong>" + esc(c.name) + "</strong></td><td>" + esc(c.citizenId || "-") + "</td>" +
+            "<td>" + healthTag(c.healthState) + "</td>" +
+            "<td>" + (c.downedRemainingSeconds != null ? c.downedRemainingSeconds + "s" : "-") + "</td>" +
+            "<td>" + c.unpaidBillCount + "</td>" +
+            "<td>" + (c.mustRespawnHospital ? '<span class="tag warn">รพ.</span>' : "-") + "</td>" +
+            "<td>" + c.hospitalizationCount + "</td>" +
+            "<td><button class=\\"btn small\\" data-mreset=\\"" + c.id + "\\">รีเซ็ต</button></td></tr>";
+        }).join("");
+        out.innerHTML = rows
+          ? "<table><tr><th>ชื่อ</th><th>citizenId</th><th>สถานะ</th><th>เหลือ</th><th>ค้างจ่าย</th><th>รพ.</th><th>ครั้ง</th><th></th></tr>" + rows + "</table>"
+          : "<p class=\\"muted\\">ไม่พบ</p>";
+        out.querySelectorAll("[data-mreset]").forEach(function (btn) {
+          btn.addEventListener("click", function () {
+            var id = Number(btn.getAttribute("data-mreset"));
+            if (!confirm("รีเซ็ตสถานะสุขภาพของตัวละคร #" + id + " เป็น healthy จริง ๆ เหรอ?")) return;
+            medAction("/admin/ems/reset", { characterId: id }).then(loadRecords);
+          });
+        });
+      });
+    }
+    page.querySelector("#m-go").addEventListener("click", loadRecords);
+    page.querySelector("#m-q").addEventListener("keydown", function (e) { if (e.key === "Enter") loadRecords(); });
+
+    function loadBills() {
+      var out = page.querySelector("#mbres");
+      var st = page.querySelector("#mb-status").value;
+      api("/admin/ems/bills" + (st ? "?status=" + encodeURIComponent(st) : "")).then(function (r) {
+        if (!r.ok) { out.innerHTML = errBox((r.data && (r.data.error || r.data.message)) || "failed"); return; }
+        var rows = (r.data.bills || []).map(function (b) {
+          return "<tr><td>#" + b.id + "</td><td>ch#" + b.patientId + "</td>" +
+            "<td>" + money(b.amountCents) + " " + esc(b.currency) + "</td>" +
+            "<td>" + esc(b.reason) + "</td><td>" + statusTag(b.status) + "</td>" +
+            "<td>" + fmtDate(b.issuedAt) + "</td>" +
+            (b.status === "unpaid"
+              ? "<td><button class=\\"btn small primary\\" data-bpay=\\"" + b.id + "\\">จ่ายแทน</button> " +
+                "<button class=\\"btn small danger\\" data-bwaive=\\"" + b.id + "\\">ยกเว้น</button></td>"
+              : "<td>-</td>") + "</tr>";
+        }).join("");
+        out.innerHTML = rows
+          ? "<table><tr><th>#</th><th>คนไข้</th><th>มูลค่า</th><th>เหตุผล</th><th>สถานะ</th><th>ออกเมื่อ</th><th></th></tr>" + rows + "</table>"
+          : "<p class=\\"muted\\">ไม่มีบิล</p>";
+      });
+    }
+    page.querySelector("#mb-refresh").addEventListener("click", loadBills);
+    page.querySelector("#mb-status").addEventListener("change", loadBills);
+    page.querySelector("#mbres").addEventListener("click", function (e) {
+      var t = e.target;
+      var id = t.getAttribute && (t.getAttribute("data-bpay") || t.getAttribute("data-bwaive"));
+      if (!id) return;
+      if (t.getAttribute("data-bpay")) {
+        if (!confirm("จ่ายค่ารักษา #" + id + " แทนคนไข้ (เงินหายจากระบบ)? ")) return;
+        medAction("/admin/ems/bills/" + id + "/pay", {}).then(loadBills);
+      } else {
+        if (!confirm("ยกเว้นค่ารักษา #" + id + " (เงินไม่เสีย)? ")) return;
+        medAction("/admin/ems/bills/" + id + "/waive", {}).then(loadBills);
+      }
+    });
+
+    loadRecords();
+    loadBills();
+  }
+
+  // ------------------------------------------------ phone
+  function renderPhone(page) {
+    page.innerHTML = "";
+    page.appendChild(el(
+      "<div class=\\"card\\"><h2>หมายเลขโทรศัพท์</h2>" +
+      "<div class=\\"row\\"><input id=\\"pn-q\\" placeholder=\\"ค้นหา ชื่อ / เบอร์\\">" +
+      "<button id=\\"pn-go\\" class=\\"btn primary\\">ค้นหา</button></div>" +
+      "<div id=\\"pnres\\"><p class=\\"muted\\">กำลังโหลด…</p></div></div>"
+    ));
+    page.appendChild(el(
+      "<div class=\\"card\\"><h2>เหตุฉุกเฉิน (911)</h2>" +
+      "<div class=\\"row\\"><select id=\\"ec-status\\"><option value=\\"\\">ทั้งหมด</option>" +
+      "<option>open</option><option>dispatched</option><option>closed</option></select>" +
+      "<button id=\\"ec-refresh\\" class=\\"btn\\">Refresh</button></div>" +
+      "<div id=\\"ecres\\"><p class=\\"muted\\">กำลังโหลด…</p></div></div>"
+    ));
+    page.appendChild(el(
+      "<div class=\\"card\\"><h2>แท็กซี่ (taxi board)</h2>" +
+      "<div class=\\"row\\"><select id=\\"tx-status\\"><option value=\\"\\">ทั้งหมด</option>" +
+      "<option>pending</option><option>accepted</option><option>completed</option><option>cancelled</option></select>" +
+      "<button id=\\"tx-refresh\\" class=\\"btn\\">Refresh</button></div>" +
+      "<div id=\\"txres\\"><p class=\\"muted\\">กำลังโหลด…</p></div></div>"
+    ));
+
+    function statusTag(s) {
+      if (s === "paid" || s === "closed" || s === "completed") return '<span class="tag ok">' + esc(s) + "</span>";
+      if (s === "unpaid" || s === "open" || s === "pending" || s === "active") return '<span class="tag warn">' + esc(s) + "</span>";
+      return '<span class="tag neutral">' + esc(s) + "</span>";
+    }
+    function medAction(endpoint, body) {
+      return api(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body || {}),
+      }).then(function (r) {
+        toast(r.ok ? "ok" : ((r.data && (r.data.error || r.data.message)) || "fail"));
+        return r;
+      });
+    }
+
+    function loadNumbers() {
+      var v = page.querySelector("#pn-q").value.trim();
+      var out = page.querySelector("#pnres");
+      out.innerHTML = "<p class=\\"muted\\">กำลังโหลด…</p>";
+      api("/admin/phone/numbers" + (v ? "?query=" + encodeURIComponent(v) : "")).then(function (r) {
+        if (!r.ok) { out.innerHTML = errBox((r.data && (r.data.error || r.data.message)) || "failed"); return; }
+        var rows = (r.data.numbers || []).map(function (n) {
+          return "<tr><td>ch#" + n.characterId + "</td><td>" + esc(n.characterName || "-") + "</td>" +
+            "<td><span class=\\"mono\\">" + esc(n.number) + "</span></td>" +
+            "<td>" + fmtDate(n.createdAt) + "</td></tr>";
+        }).join("");
+        out.innerHTML = rows
+          ? "<table><tr><th>ตัวละคร</th><th>ชื่อ</th><th>เบอร์</th><th>ออกเมื่อ</th></tr>" + rows + "</table>"
+          : "<p class=\\"muted\\">ไม่พบ</p>";
+      });
+    }
+    page.querySelector("#pn-go").addEventListener("click", loadNumbers);
+    page.querySelector("#pn-q").addEventListener("keydown", function (e) { if (e.key === "Enter") loadNumbers(); });
+
+    function loadEmergency() {
+      var out = page.querySelector("#ecres");
+      var st = page.querySelector("#ec-status").value;
+      api("/admin/phone/emergency" + (st ? "?status=" + encodeURIComponent(st) : "")).then(function (r) {
+        if (!r.ok) { out.innerHTML = errBox((r.data && (r.data.error || r.data.message)) || "failed"); return; }
+        var rows = (r.data.calls || []).map(function (c) {
+          return "<tr><td>#" + c.id + "</td><td>" + esc(c.callerName || "#" + c.callerCharacterId) + "</td>" +
+            "<td>" + esc(c.category) + "</td><td>" + esc(c.subject) + "</td>" +
+            "<td>" + statusTag(c.status) + "</td><td>" + fmtDate(c.createdAt) + "</td>" +
+            (c.status !== "closed"
+              ? "<td><button class=\\"btn small primary\\" data-ecclose=\\"" + c.id + "\\">ปิด</button></td>"
+              : "<td>-</td>") + "</tr>";
+        }).join("");
+        out.innerHTML = rows
+          ? "<table><tr><th>#</th><th>ผู้แจ้ง</th><th>ประเภท</th><th>เรื่อง</th><th>สถานะ</th><th>แจ้งเมื่อ</th><th></th></tr>" + rows + "</table>"
+          : "<p class=\\"muted\\">ไม่มีเหตุฉุกเฉิน</p>";
+      });
+    }
+    page.querySelector("#ec-refresh").addEventListener("click", loadEmergency);
+    page.querySelector("#ec-status").addEventListener("change", loadEmergency);
+    page.querySelector("#ecres").addEventListener("click", function (e) {
+      var t = e.target;
+      var id = t.getAttribute && t.getAttribute("data-ecclose");
+      if (!id) return;
+      if (!confirm("ปิดเหตุฉุกเฉิน #" + id + " (responder = admin)? ")) return;
+      medAction("/admin/phone/emergency/" + id + "/close", {}).then(loadEmergency);
+    });
+
+    function loadTaxi() {
+      var out = page.querySelector("#txres");
+      var st = page.querySelector("#tx-status").value;
+      api("/admin/phone/taxi" + (st ? "?status=" + encodeURIComponent(st) : "")).then(function (r) {
+        if (!r.ok) { out.innerHTML = errBox((r.data && (r.data.error || r.data.message)) || "failed"); return; }
+        var rows = (r.data.requests || []).map(function (t) {
+          return "<tr><td>#" + t.id + "</td><td>" + esc(t.requesterName || "#" + t.requesterCharacterId) + "</td>" +
+            "<td>" + esc(t.destination) + "</td>" +
+            "<td>" + money(t.fareCents) + " " + esc(t.currency) + "</td>" +
+            "<td>" + statusTag(t.status) + "</td>" +
+            "<td>" + (esc(t.driverName || (t.driverCharacterId ? "#" + t.driverCharacterId : "—"))) + "</td></tr>";
+        }).join("");
+        out.innerHTML = rows
+          ? "<table><tr><th>#</th><th>ผู้เรียก</th><th>ปลายทาง</th><th>ค่าโดยสาร</th><th>สถานะ</th><th>คนขับ</th></tr>" + rows + "</table>"
+          : "<p class=\\"muted\\">ไม่มีงานแท็กซี่</p>";
+      });
+    }
+    page.querySelector("#tx-refresh").addEventListener("click", loadTaxi);
+    page.querySelector("#tx-status").addEventListener("change", loadTaxi);
+
+    loadNumbers();
+    loadEmergency();
+    loadTaxi();
   }
 
   // ------------------------------------------------ boot

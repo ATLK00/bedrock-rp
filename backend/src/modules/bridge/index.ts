@@ -6,6 +6,8 @@ import * as economy from "../economy/index.js";
 import * as vehicle from "../vehicle/index.js";
 import * as property from "../property/index.js";
 import * as police from "../police/index.js";
+import * as ems from "../ems/index.js";
+import * as phone from "../phone/index.js";
 import { hasPermission } from "../../rbac/index.js";
 import { emitSecurityEvent } from "../security/index.js";
 
@@ -1331,5 +1333,715 @@ bridgeRouter.post("/police/record", async (req, res) => {
       requestId: (req as unknown as { requestId?: string }).requestId ?? null,
     });
     return { record };
+  });
+});
+
+// ===========================================================================
+// EMS (medic / downed-state / hospital) — MASTER_PROMPT §17+§18
+// ===========================================================================
+
+async function emsCall(req: any, res: any, action: string, fn: () => Promise<object>): Promise<void> {
+  const startedAt = Date.now();
+  try {
+    const result = await fn();
+    logBridge(action, req, startedAt, 200);
+    res.json({ ok: true, ...result });
+  } catch (err: any) {
+    let status = 500;
+    if (err instanceof ems.MedicalRecordNotFoundError || err instanceof ems.BillNotFoundError) {
+      status = 404;
+    } else if (err instanceof ems.BillAccessDeniedError) {
+      status = 403;
+    } else if (
+      err instanceof ems.BillAlreadyPaidError ||
+      err instanceof ems.StateTransitionError ||
+      err instanceof economy.InsufficientFundsError
+    ) {
+      status = 409;
+    }
+    logBridge(action, req, startedAt, status);
+    res.status(status).json({ ok: false, message: err && err.message ? err.message : "Something went wrong. Try again." });
+  }
+}
+
+/** EMS medic gate (mirror of authorizePoliceActor). */
+async function authorizeEmsActor(params: {
+  req: any;
+  res: any;
+  permission: string;
+  command: string;
+  actorName: string | null;
+  actorPersistentId: string | null;
+  extra?: Record<string, unknown>;
+}): Promise<{ actorCharacterId: number; actorUserId: number; actorName: string } | null> {
+  const { req, res, permission, command, actorName, actorPersistentId, extra } = params;
+  const startedAt = Date.now();
+  const logAction = `ems.${command}`;
+
+  const actorCharacter = actorPersistentId ? await findCharacterByPersistentId(actorPersistentId) : null;
+  if (!actorCharacter || !actorPersistentId) {
+    logBridge(logAction, req, startedAt, 404);
+    res.status(404).json({ ok: false, message: "Your Minecraft account isn't linked to a character — log in to the site and link it before using EMS commands." });
+    return null;
+  }
+
+  const allowed = await hasPermission(actorCharacter.userId, permission);
+  if (!allowed) {
+    await emitSecurityEvent({
+      eventType: "staff_command_forbidden",
+      severity: "HIGH",
+      actorUserId: actorCharacter.userId,
+      targetType: "character",
+      targetId: String(actorCharacter.id),
+      payload: { command: logAction, actorName: actorName ?? null, ...(extra ?? {}) },
+    });
+    logBridge(logAction, req, startedAt, 403);
+    res.status(403).json({ ok: false, message: "You don't have permission to use EMS commands in-game." });
+    return null;
+  }
+  return { actorCharacterId: Number(actorCharacter.id), actorUserId: Number(actorCharacter.userId), actorName: actorName ?? "unknown" };
+}
+
+/** `!ems` root — self-service health state, always available. */
+bridgeRouter.post("/ems/me", async (req, res) => {
+  const actor = await requireBridgeActor(res, req.body);
+  if (!actor) return;
+  const [mine, roles] = await Promise.all([
+    ems.getMineMedicalState(actor.characterId),
+    (async () => {
+      const [canView, canManage, canAdmin] = await Promise.all([
+        hasPermission(actor.userId, "ems.view"),
+        hasPermission(actor.userId, "ems.manage"),
+        hasPermission(actor.userId, "ems.admin"),
+      ]);
+      return { canView, canManage, canAdmin };
+    })(),
+  ]);
+  logBridge("ems.me", req, Date.now(), 200);
+  res.json({ ok: true, mine, roles });
+});
+
+/** Self-report being downed (pack fires this on crit/knock). */
+bridgeRouter.post("/ems/down", async (req, res) => {
+  const actor = await requireBridgeActor(res, req.body);
+  if (!actor) return;
+  const { x, y, z, dimensionId } = (req.body ?? {}) as { x?: unknown; y?: unknown; z?: unknown; dimensionId?: unknown };
+  const loc = { x: Number(x), y: Number(y), z: Number(z), dimensionId: String(dimensionId ?? "overworld") };
+  await emsCall(req, res, "ems.down", async () => {
+    const medical = await ems.reportDown({
+      characterId: actor.characterId,
+      byCharacterId: null,
+      location: loc,
+      actorUserId: actor.userId,
+      requestId: (req as unknown as { requestId?: string }).requestId ?? null,
+    });
+    return { medical };
+  });
+});
+
+/** Self-report a death (entityDie). */
+bridgeRouter.post("/ems/death", async (req, res) => {
+  const actor = await requireBridgeActor(res, req.body);
+  if (!actor) return;
+  await emsCall(req, res, "ems.death", async () => {
+    const medical = await ems.declareDeath({
+      characterId: actor.characterId,
+      byCharacterId: null,
+      selfReport: true,
+      actorUserId: actor.userId,
+      requestId: (req as unknown as { requestId?: string }).requestId ?? null,
+    });
+    return { medical };
+  });
+});
+
+/** Self-service hospital respawn (pack calls after enforcing hospital spawn). */
+bridgeRouter.post("/ems/hospitalize", async (req, res) => {
+  const actor = await requireBridgeActor(res, req.body);
+  if (!actor) return;
+  await emsCall(req, res, "ems.hospitalize", async () => {
+    const result = await ems.hospitalize({
+      characterId: actor.characterId,
+      actorUserId: actor.userId,
+      requestId: (req as unknown as { requestId?: string }).requestId ?? null,
+    });
+    return { record: result.record, bill: result.bill };
+  });
+});
+
+/** Medic rescues a downed citizen (opens the "rescue yourself or hospitalize" timer). */
+bridgeRouter.post("/ems/rescue", async (req, res) => {
+  const login = parsePoliceBodyLogin(req.body);
+  const { targetName, targetPersistentId } = (req.body ?? {}) as { targetName?: unknown; targetPersistentId?: unknown };
+  if (!isNonEmptyString(targetPersistentId) || targetPersistentId.length > MAX_IDENTIFIER_LENGTH) {
+    return res.status(400).json({ ok: false, message: "targetPersistentId is required." });
+  }
+  const actor = await authorizeEmsActor({ req, res, permission: "ems.manage", command: "rescue", actorName: login.actorName, actorPersistentId: login.actorPersistentId });
+  if (!actor) return;
+  const target = await resolveTargetCharacter({ targetPersistentId: String(targetPersistentId), targetName: isNonEmptyString(targetName) ? String(targetName) : "target", res, logAction: "ems.rescue", req });
+  if (!target) return;
+  await emsCall(req, res, "ems.rescue", async () => {
+    const medical = await ems.rescue({
+      characterId: target.targetCharacterId,
+      medicCharacterId: actor.actorCharacterId,
+      actorUserId: actor.actorUserId,
+      requestId: (req as unknown as { requestId?: string }).requestId ?? null,
+    });
+    return { medical };
+  });
+});
+
+/** Medic treats a rescued citizen — treatment costs the citizen a medical bill. */
+bridgeRouter.post("/ems/treat", async (req, res) => {
+  const login = parsePoliceBodyLogin(req.body);
+  const { targetName, targetPersistentId } = (req.body ?? {}) as { targetName?: unknown; targetPersistentId?: unknown };
+  if (!isNonEmptyString(targetPersistentId) || targetPersistentId.length > MAX_IDENTIFIER_LENGTH) {
+    return res.status(400).json({ ok: false, message: "targetPersistentId is required." });
+  }
+  const actor = await authorizeEmsActor({ req, res, permission: "ems.manage", command: "treat", actorName: login.actorName, actorPersistentId: login.actorPersistentId });
+  if (!actor) return;
+  const target = await resolveTargetCharacter({ targetPersistentId: String(targetPersistentId), targetName: isNonEmptyString(targetName) ? String(targetName) : "target", res, logAction: "ems.treat", req });
+  if (!target) return;
+  await emsCall(req, res, "ems.treat", async () => {
+    const medical = await ems.treat({
+      characterId: target.targetCharacterId,
+      medicCharacterId: actor.actorCharacterId,
+      actorUserId: actor.actorUserId,
+      requestId: (req as unknown as { requestId?: string }).requestId ?? null,
+    });
+    return { medical };
+  });
+});
+
+/** Medic declares a citizen's death (moves them to the respawn-hospital queue). */
+bridgeRouter.post("/ems/declare-death", async (req, res) => {
+  const login = parsePoliceBodyLogin(req.body);
+  const { targetName, targetPersistentId } = (req.body ?? {}) as { targetName?: unknown; targetPersistentId?: unknown };
+  if (!isNonEmptyString(targetPersistentId) || targetPersistentId.length > MAX_IDENTIFIER_LENGTH) {
+    return res.status(400).json({ ok: false, message: "targetPersistentId is required." });
+  }
+  const actor = await authorizeEmsActor({ req, res, permission: "ems.manage", command: "declare_death", actorName: login.actorName, actorPersistentId: login.actorPersistentId });
+  if (!actor) return;
+  const target = await resolveTargetCharacter({ targetPersistentId: String(targetPersistentId), targetName: isNonEmptyString(targetName) ? String(targetName) : "target", res, logAction: "ems.declare_death", req });
+  if (!target) return;
+  await emsCall(req, res, "ems.declare_death", async () => {
+    const medical = await ems.declareDeath({
+      characterId: target.targetCharacterId,
+      byCharacterId: actor.actorCharacterId,
+      selfReport: false,
+      actorUserId: actor.actorUserId,
+      requestId: (req as unknown as { requestId?: string }).requestId ?? null,
+    });
+    return { medical };
+  });
+});
+
+/** Full medical dossier lookup by name/citizenId (ems.view). */
+bridgeRouter.post("/ems/lookup", async (req, res) => {
+  const login = parsePoliceBodyLogin(req.body);
+  const query = isNonEmptyString((req.body ?? {}).query) ? String((req.body ?? {}).query).trim() : "";
+  if (query.length === 0 || query.length > 128) {
+    return res.status(400).json({ ok: false, message: "query (citizen name or citizen id) is required." });
+  }
+  const actor = await authorizeEmsActor({ req, res, permission: "ems.view", command: "lookup", actorName: login.actorName, actorPersistentId: login.actorPersistentId, extra: { query } });
+  if (!actor) return;
+  await emsCall(req, res, "ems.lookup", async () => {
+    const citizen = await ems.searchMedical(query);
+    if (!citizen) throw new ems.MedicalRecordNotFoundError("No citizen found for that name or citizen id.");
+    return { citizen };
+  });
+});
+
+/** Citizen pays one of their own medical bills. */
+bridgeRouter.post("/ems/bill/pay", async (req, res) => {
+  const actor = await requireBridgeActor(res, req.body);
+  if (!actor) return;
+  const billId = Number((req.body ?? {}).billId);
+  if (!Number.isSafeInteger(billId) || billId <= 0) {
+    return res.status(400).json({ ok: false, message: "billId is required." });
+  }
+  await emsCall(req, res, "ems.bill.pay", async () => {
+    const bill = await ems.payBill({
+      billId,
+      characterId: actor.characterId,
+      actorUserId: actor.userId,
+      requestId: (req as unknown as { requestId?: string }).requestId ?? null,
+    });
+    return { bill };
+  });
+});
+
+// ===========================================================================
+// Phone (expandable app framework; all 8 seed apps) — MASTER_PROMPT §15
+// ===========================================================================
+
+async function phoneCall(req: any, res: any, action: string, fn: () => Promise<object>): Promise<void> {
+  const startedAt = Date.now();
+  try {
+    const result = await fn();
+    logBridge(action, req, startedAt, 200);
+    res.json({ ok: true, ...result });
+  } catch (err: any) {
+    let status = 500;
+    if (err instanceof phone.SelfActionError) {
+      status = 400;
+    } else if (
+      err instanceof phone.PhoneNumberNotFoundError ||
+      err instanceof phone.ContactNotFoundError ||
+      err instanceof phone.MessageNotFoundError ||
+      err instanceof phone.CallNotFoundError ||
+      err instanceof phone.TaxiRequestNotFoundError ||
+      err instanceof phone.EmergencyCallNotFoundError
+    ) {
+      status = 404;
+    } else if (err instanceof phone.CallAccessDeniedError || err instanceof phone.TaxiAccessDeniedError) {
+      status = 403;
+    } else if (
+      err instanceof phone.CallNotActiveError ||
+      err instanceof phone.TaxiNotActionableError ||
+      err instanceof phone.EmergencyNotActionableError ||
+      err instanceof economy.InsufficientFundsError
+    ) {
+      status = 409;
+    }
+    logBridge(action, req, startedAt, status);
+    res.status(status).json({ ok: false, message: err && err.message ? err.message : "Something went wrong. Try again." });
+  }
+}
+
+/** Role flags for the phone UI (phone.* permissions are shared/operator surfaces). */
+bridgeRouter.post("/phone/roles", async (req, res) => {
+  const actor = await requireBridgeActor(res, req.body);
+  if (!actor) return;
+  const [canView, canManage, canTaxiManage, canEmergencyView, canEmergencyManage] = await Promise.all([
+    hasPermission(actor.userId, "phone.view"),
+    hasPermission(actor.userId, "phone.manage"),
+    hasPermission(actor.userId, "phone.taxi.manage"),
+    hasPermission(actor.userId, "phone.emergency.view"),
+    hasPermission(actor.userId, "phone.emergency.manage"),
+  ]);
+  logBridge("phone.roles", req, Date.now(), 200);
+  res.json({
+    ok: true,
+    roles: { canView, canManage, canTaxiManage, canEmergencyView, canEmergencyManage },
+  });
+});
+
+/** `!phone` root — number, unread count, role flags, current health state. */
+bridgeRouter.post("/phone/me", async (req, res) => {
+  const actor = await requireBridgeActor(res, req.body);
+  if (!actor) return;
+  const roles = await (async () => {
+    const [canEmergencyView, canEmergencyManage, canTaxiManage] = await Promise.all([
+      hasPermission(actor.userId, "phone.emergency.view"),
+      hasPermission(actor.userId, "phone.emergency.manage"),
+      hasPermission(actor.userId, "phone.taxi.manage"),
+    ]);
+    return { canEmergencyView, canEmergencyManage, canTaxiManage };
+  })();
+  const info = await phone.getPhoneInfo({ characterId: actor.characterId, ...roles });
+  logBridge("phone.me", req, Date.now(), 200);
+  res.json({ ok: true, mine: info });
+});
+
+// --- contacts --------------------------------------------------------------
+
+bridgeRouter.post("/phone/contacts", async (req, res) => {
+  const actor = await requireBridgeActor(res, req.body);
+  if (!actor) return;
+  const contacts = await phone.listContacts(actor.characterId);
+  logBridge("phone.contacts", req, Date.now(), 200);
+  res.json({ ok: true, contacts });
+});
+
+bridgeRouter.post("/phone/contacts/add", async (req, res) => {
+  const actor = await requireBridgeActor(res, req.body);
+  if (!actor) return;
+  const { name, number, note } = (req.body ?? {}) as { name?: unknown; number?: unknown; note?: unknown };
+  await phoneCall(req, res, "phone.contacts.add", async () => {
+    const contact = await phone.addContact({
+      characterId: actor.characterId,
+      name: String(name ?? ""),
+      number: String(number ?? ""),
+      note: note == null ? null : String(note),
+      actorUserId: actor.userId,
+      requestId: (req as unknown as { requestId?: string }).requestId ?? null,
+    });
+    return { contact };
+  });
+});
+
+bridgeRouter.post("/phone/contacts/update", async (req, res) => {
+  const actor = await requireBridgeActor(res, req.body);
+  if (!actor) return;
+  const { contactId, name, number, note } = (req.body ?? {}) as { contactId?: unknown; name?: unknown; number?: unknown; note?: unknown };
+  const id = Number(contactId);
+  if (!Number.isSafeInteger(id) || id <= 0) return res.status(400).json({ ok: false, message: "contactId is required." });
+  await phoneCall(req, res, "phone.contacts.update", async () => {
+    const contact = await phone.updateContact({
+      characterId: actor.characterId,
+      contactId: id,
+      name: name == null ? null : String(name),
+      number: number == null ? null : String(number),
+      note: note == null ? null : String(note),
+      actorUserId: actor.userId,
+      requestId: (req as unknown as { requestId?: string }).requestId ?? null,
+    });
+    return { contact };
+  });
+});
+
+bridgeRouter.post("/phone/contacts/delete", async (req, res) => {
+  const actor = await requireBridgeActor(res, req.body);
+  if (!actor) return;
+  const contactId = Number((req.body ?? {}).contactId);
+  if (!Number.isSafeInteger(contactId) || contactId <= 0) return res.status(400).json({ ok: false, message: "contactId is required." });
+  await phoneCall(req, res, "phone.contacts.delete", async () => {
+    await phone.deleteContact({
+      characterId: actor.characterId,
+      contactId,
+      actorUserId: actor.userId,
+      requestId: (req as unknown as { requestId?: string }).requestId ?? null,
+    });
+    return {};
+  });
+});
+
+// --- messages --------------------------------------------------------------
+
+bridgeRouter.post("/phone/messages/send", async (req, res) => {
+  const actor = await requireBridgeActor(res, req.body);
+  if (!actor) return;
+  const { toNumber, body } = (req.body ?? {}) as { toNumber?: unknown; body?: unknown };
+  await phoneCall(req, res, "phone.messages.send", async () => {
+    const message = await phone.sendMessage({
+      fromCharacterId: actor.characterId,
+      toNumber: String(toNumber ?? ""),
+      body: String(body ?? ""),
+      actorUserId: actor.userId,
+      requestId: (req as unknown as { requestId?: string }).requestId ?? null,
+    });
+    return { message };
+  });
+});
+
+bridgeRouter.post("/phone/messages/inbox", async (req, res) => {
+  const actor = await requireBridgeActor(res, req.body);
+  if (!actor) return;
+  const limit = Number((req.body ?? {}).limit ?? 50);
+  const messages = await phone.getInbox(actor.characterId, limit);
+  logBridge("phone.messages.inbox", req, Date.now(), 200);
+  res.json({ ok: true, messages });
+});
+
+bridgeRouter.post("/phone/messages/outbox", async (req, res) => {
+  const actor = await requireBridgeActor(res, req.body);
+  if (!actor) return;
+  const limit = Number((req.body ?? {}).limit ?? 50);
+  const messages = await phone.getOutbox(actor.characterId, limit);
+  logBridge("phone.messages.outbox", req, Date.now(), 200);
+  res.json({ ok: true, messages });
+});
+
+// --- calls ------------------------------------------------------------------
+
+bridgeRouter.post("/phone/calls/list", async (req, res) => {
+  const actor = await requireBridgeActor(res, req.body);
+  if (!actor) return;
+  const limit = Number((req.body ?? {}).limit ?? 20);
+  const calls = await phone.listCalls(actor.characterId, limit);
+  logBridge("phone.calls.list", req, Date.now(), 200);
+  res.json({ ok: true, calls });
+});
+
+bridgeRouter.post("/phone/calls/initiate", async (req, res) => {
+  const actor = await requireBridgeActor(res, req.body);
+  if (!actor) return;
+  const { toNumber } = (req.body ?? {}) as { toNumber?: unknown };
+  await phoneCall(req, res, "phone.calls.initiate", async () => {
+    const call = await phone.initiateCall({
+      callerCharacterId: actor.characterId,
+      toNumber: String(toNumber ?? ""),
+      actorUserId: actor.userId,
+      requestId: (req as unknown as { requestId?: string }).requestId ?? null,
+    });
+    return { call };
+  });
+});
+
+bridgeRouter.post("/phone/calls/accept", async (req, res) => {
+  const actor = await requireBridgeActor(res, req.body);
+  if (!actor) return;
+  const callId = Number((req.body ?? {}).callId);
+  if (!Number.isSafeInteger(callId) || callId <= 0) return res.status(400).json({ ok: false, message: "callId is required." });
+  await phoneCall(req, res, "phone.calls.accept", async () => {
+    const call = await phone.acceptCall({
+      callId,
+      calleeCharacterId: actor.characterId,
+      actorUserId: actor.userId,
+      requestId: (req as unknown as { requestId?: string }).requestId ?? null,
+    });
+    return { call };
+  });
+});
+
+bridgeRouter.post("/phone/calls/hangup", async (req, res) => {
+  const actor = await requireBridgeActor(res, req.body);
+  if (!actor) return;
+  const callId = Number((req.body ?? {}).callId);
+  if (!Number.isSafeInteger(callId) || callId <= 0) return res.status(400).json({ ok: false, message: "callId is required." });
+  await phoneCall(req, res, "phone.calls.hangup", async () => {
+    const call = await phone.hangupCall({
+      callId,
+      actorCharacterId: actor.characterId,
+      actorUserId: actor.userId,
+      requestId: (req as unknown as { requestId?: string }).requestId ?? null,
+    });
+    return { call };
+  });
+});
+
+// --- bank -------------------------------------------------------------------
+
+bridgeRouter.post("/phone/bank/state", async (req, res) => {
+  const actor = await requireBridgeActor(res, req.body);
+  if (!actor) return;
+  const state = await phone.getBankState(actor.characterId);
+  logBridge("phone.bank.state", req, Date.now(), 200);
+  res.json({ ok: true, ...state });
+});
+
+bridgeRouter.post("/phone/bank/transfer", async (req, res) => {
+  const actor = await requireBridgeActor(res, req.body);
+  if (!actor) return;
+  const { toNumber, amountCents, currency, reason } = (req.body ?? {}) as { toNumber?: unknown; amountCents?: unknown; currency?: unknown; reason?: unknown };
+  await phoneCall(req, res, "phone.bank.transfer", async () => {
+    const transfer = await phone.transferByPhone({
+      fromCharacterId: actor.characterId,
+      toNumber: String(toNumber ?? ""),
+      amountCents: Number(amountCents ?? 0),
+      currency: currency == null ? "cash" : String(currency),
+      reason: reason == null ? null : String(reason),
+      actorUserId: actor.userId,
+      requestId: (req as unknown as { requestId?: string }).requestId ?? null,
+    });
+    return { transfer };
+  });
+});
+
+// --- GPS --------------------------------------------------------------------
+
+bridgeRouter.post("/phone/gps/list", async (req, res) => {
+  const actor = await requireBridgeActor(res, req.body);
+  if (!actor) return;
+  const waypoints = await phone.listWaypoints(actor.characterId);
+  logBridge("phone.gps.list", req, Date.now(), 200);
+  res.json({ ok: true, waypoints });
+});
+
+bridgeRouter.post("/phone/gps/add", async (req, res) => {
+  const actor = await requireBridgeActor(res, req.body);
+  if (!actor) return;
+  const { name, x, y, z, dimensionId, note } = (req.body ?? {}) as { name?: unknown; x?: unknown; y?: unknown; z?: unknown; dimensionId?: unknown; note?: unknown };
+  await phoneCall(req, res, "phone.gps.add", async () => {
+    const waypoint = await phone.addWaypoint({
+      characterId: actor.characterId,
+      name: String(name ?? ""),
+      x: Number(x),
+      y: Number(y),
+      z: Number(z),
+      dimensionId: dimensionId == null ? undefined : String(dimensionId),
+      note: note == null ? null : String(note),
+      actorUserId: actor.userId,
+      requestId: (req as unknown as { requestId?: string }).requestId ?? null,
+    });
+    return { waypoint };
+  });
+});
+
+bridgeRouter.post("/phone/gps/delete", async (req, res) => {
+  const actor = await requireBridgeActor(res, req.body);
+  if (!actor) return;
+  const waypointId = Number((req.body ?? {}).waypointId);
+  if (!Number.isSafeInteger(waypointId) || waypointId <= 0) return res.status(400).json({ ok: false, message: "waypointId is required." });
+  await phoneCall(req, res, "phone.gps.delete", async () => {
+    await phone.deleteWaypoint({
+      characterId: actor.characterId,
+      waypointId,
+      actorUserId: actor.userId,
+      requestId: (req as unknown as { requestId?: string }).requestId ?? null,
+    });
+    return {};
+  });
+});
+
+// --- taxi -------------------------------------------------------------------
+
+/** Call a taxi (rider side). */
+bridgeRouter.post("/phone/taxi/request", async (req, res) => {
+  const actor = await requireBridgeActor(res, req.body);
+  if (!actor) return;
+  const { x, y, z, dimensionId, destination, fareCents, currency } = (req.body ?? {}) as { x?: unknown; y?: unknown; z?: unknown; dimensionId?: unknown; destination?: unknown; fareCents?: unknown; currency?: unknown };
+  await phoneCall(req, res, "phone.taxi.request", async () => {
+    const taxiRequest = await phone.requestTaxi({
+      requesterCharacterId: actor.characterId,
+      x: Number(x),
+      y: Number(y),
+      z: Number(z),
+      dimensionId: dimensionId == null ? undefined : String(dimensionId),
+      destination: String(destination ?? ""),
+      fareCents: Number(fareCents ?? 0),
+      currency: currency == null ? undefined : String(currency),
+      actorUserId: actor.userId,
+      requestId: (req as unknown as { requestId?: string }).requestId ?? null,
+    });
+    return { taxiRequest };
+  });
+});
+
+bridgeRouter.post("/phone/taxi/mine", async (req, res) => {
+  const actor = await requireBridgeActor(res, req.body);
+  if (!actor) return;
+  const requests = await phone.myTaxiRequests(actor.characterId);
+  logBridge("phone.taxi.mine", req, Date.now(), 200);
+  res.json({ ok: true, requests });
+});
+
+/** Driver job board (phone.taxi.manage). */
+bridgeRouter.post("/phone/taxi/list", async (req, res) => {
+  const actor = await requireBridgeActor(res, req.body);
+  if (!actor) return;
+  const canManage = await hasPermission(actor.userId, "phone.taxi.manage");
+  if (!canManage) {
+    logBridge("phone.taxi.list", req, Date.now(), 403);
+    return res.status(403).json({ ok: false, message: "You aren't a registered taxi driver (phone.taxi.manage)." });
+  }
+  const status = (req.body ?? {}).status == null ? undefined : String((req.body ?? {}).status);
+  const requests = await phone.listTaxiRequests(30, status);
+  logBridge("phone.taxi.list", req, Date.now(), 200);
+  res.json({ ok: true, requests });
+});
+
+bridgeRouter.post("/phone/taxi/accept", async (req, res) => {
+  const actor = await requireBridgeActor(res, req.body);
+  if (!actor) return;
+  const canManage = await hasPermission(actor.userId, "phone.taxi.manage");
+  if (!canManage) {
+    logBridge("phone.taxi.accept", req, Date.now(), 403);
+    return res.status(403).json({ ok: false, message: "You aren't a registered taxi driver (phone.taxi.manage)." });
+  }
+  const taxiRequestId = Number((req.body ?? {}).taxiRequestId);
+  if (!Number.isSafeInteger(taxiRequestId) || taxiRequestId <= 0) return res.status(400).json({ ok: false, message: "taxiRequestId is required." });
+  await phoneCall(req, res, "phone.taxi.accept", async () => {
+    const taxiRequest = await phone.acceptTaxi({
+      taxiRequestId,
+      driverCharacterId: actor.characterId,
+      actorUserId: actor.userId,
+      requestId: (req as unknown as { requestId?: string }).requestId ?? null,
+    });
+    return { taxiRequest };
+  });
+});
+
+bridgeRouter.post("/phone/taxi/complete", async (req, res) => {
+  const actor = await requireBridgeActor(res, req.body);
+  if (!actor) return;
+  const canManage = await hasPermission(actor.userId, "phone.taxi.manage");
+  if (!canManage) {
+    logBridge("phone.taxi.complete", req, Date.now(), 403);
+    return res.status(403).json({ ok: false, message: "You aren't a registered taxi driver (phone.taxi.manage)." });
+  }
+  const taxiRequestId = Number((req.body ?? {}).taxiRequestId);
+  if (!Number.isSafeInteger(taxiRequestId) || taxiRequestId <= 0) return res.status(400).json({ ok: false, message: "taxiRequestId is required." });
+  await phoneCall(req, res, "phone.taxi.complete", async () => {
+    const taxiRequest = await phone.completeTaxi({
+      taxiRequestId,
+      driverCharacterId: actor.characterId,
+      actorUserId: actor.userId,
+      requestId: (req as unknown as { requestId?: string }).requestId ?? null,
+    });
+    return { taxiRequest };
+  });
+});
+
+bridgeRouter.post("/phone/taxi/cancel", async (req, res) => {
+  const actor = await requireBridgeActor(res, req.body);
+  if (!actor) return;
+  const taxiRequestId = Number((req.body ?? {}).taxiRequestId);
+  if (!Number.isSafeInteger(taxiRequestId) || taxiRequestId <= 0) return res.status(400).json({ ok: false, message: "taxiRequestId is required." });
+  await phoneCall(req, res, "phone.taxi.cancel", async () => {
+    const taxiRequest = await phone.cancelTaxi({
+      taxiRequestId,
+      characterId: actor.characterId,
+      actorUserId: actor.userId,
+      requestId: (req as unknown as { requestId?: string }).requestId ?? null,
+    });
+    return { taxiRequest };
+  });
+});
+
+// --- emergency (911, dispatch) ------------------------------------------------
+
+bridgeRouter.post("/phone/emergency/create", async (req, res) => {
+  const actor = await requireBridgeActor(res, req.body);
+  if (!actor) return;
+  const { category, subject, x, y, z, dimensionId } = (req.body ?? {}) as { category?: unknown; subject?: unknown; x?: unknown; y?: unknown; z?: unknown; dimensionId?: unknown };
+  await phoneCall(req, res, "phone.emergency.create", async () => {
+    const call = await phone.createEmergencyCall({
+      callerCharacterId: actor.characterId,
+      category: String(category ?? ""),
+      subject: String(subject ?? ""),
+      x: x == null ? null : Number(x),
+      y: y == null ? null : Number(y),
+      z: z == null ? null : Number(z),
+      dimensionId: dimensionId == null ? undefined : String(dimensionId),
+      actorUserId: actor.userId,
+      requestId: (req as unknown as { requestId?: string }).requestId ?? null,
+    });
+    return { call };
+  });
+});
+
+bridgeRouter.post("/phone/emergency/list", async (req, res) => {
+  const actor = await requireBridgeActor(res, req.body);
+  if (!actor) return;
+  const canView = await hasPermission(actor.userId, "phone.emergency.view");
+  const { status } = (req.body ?? {}) as { status?: unknown };
+  const calls = await phone.listEmergencyCalls(actor.characterId, {
+    includeAll: canView,
+    status: status == null ? undefined : String(status),
+  });
+  logBridge("phone.emergency.list", req, Date.now(), 200);
+  res.json({ ok: true, calls });
+});
+
+bridgeRouter.post("/phone/emergency/close", async (req, res) => {
+  const actor = await requireBridgeActor(res, req.body);
+  if (!actor) return;
+  const canManage = await hasPermission(actor.userId, "phone.emergency.manage");
+  if (!canManage) {
+    await emitSecurityEvent({
+      eventType: "staff_command_forbidden",
+      severity: "HIGH",
+      actorUserId: actor.userId,
+      targetType: "character",
+      targetId: String(actor.characterId),
+      payload: { command: "phone.emergency.close" },
+    });
+    logBridge("phone.emergency.close", req, Date.now(), 403);
+    return res.status(403).json({ ok: false, message: "Only dispatchers can close emergency calls (phone.emergency.manage)." });
+  }
+  const callId = Number((req.body ?? {}).callId);
+  if (!Number.isSafeInteger(callId) || callId <= 0) return res.status(400).json({ ok: false, message: "callId is required." });
+  const note = (req.body ?? {}).note == null ? null : String((req.body ?? {}).note);
+  await phoneCall(req, res, "phone.emergency.close", async () => {
+    const call = await phone.closeEmergencyCall({
+      callId,
+      responderCharacterId: actor.characterId,
+      note,
+      actorUserId: actor.userId,
+      requestId: (req as unknown as { requestId?: string }).requestId ?? null,
+    });
+    return { call };
   });
 });

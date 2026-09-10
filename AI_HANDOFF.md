@@ -7,6 +7,86 @@
   real infrastructure; a small set of infrastructure-dependent paths remains
   explicitly unverified (listed below under **Unverified**).
 
+## 2026-09-10 Round 11 — EMS / emergency services + Phone app stack
+
+### EMS (`backend/src/modules/ems/` + migration `028_ems.sql`)
+- Server-authoritative health state machine per citizen
+  (`healthy → downed → treated → healthy`, plus `dead`) on `medical_records`
+  (one row per citizen, lazily ensured). Writes: `reportDown` (self or actor,
+  stores downed location + dimension), `rescue` (downed→treated),
+  `treat` (treated→healthy, issues a `MEDICAL_BILL_CENTS` hospital bill — the
+  money sink), `declareDeath` (self-report allowed; medic requires downed/
+  treated), `hospitalize` (dead→healthy, `hospitalization_count + 1`, bill;
+  only when `must_respawn_hospital`), `payBill` (economy debit refType
+  `medical`, double-pay locked). Reads: `getMineMedicalState` (own dossier),
+  `searchMedical(query)` (by `citizen_id` then `name ILIKE`; used by
+  `/bridge/ems/lookup`). Downed expiry is lazy on read
+  (`EMS_DOWNED_EXPIRY_SECONDS`, default 900s) — a past-due downed row rolls to
+  dead on read so spawn enforcement fires. Permissions `ems.view`/`manage`/
+  `admin` (admin role + new `ems` role). Every transition audited
+  (`ems.lookup/down/rescue/treat/death/hospitalize/bill.pay/bill.waive/reset`).
+- Bridge: `/bridge/ems/{me,down,death,hospitalize,rescue,treat,declare-death,
+  lookup,bill/pay}` under `authorizeEmsActor` (denied non-medic → HIGH
+  `staff_command_forbidden`), `emsCall` error mapper. `hospitalize` returns
+  `{ record, bill }`. Admin `/admin/ems/{records,records/:id,bills,bills/:id,
+  bills/:id/pay,bills/:id/waive,reset}`; player web `GET /character/medical` +
+  bill pay; adminWeb "หมอ" tab; playerWeb medical card.
+- Pack `behavior_pack/scripts/ems_ui.js` (`!ems`/`!medic`): citizen root with
+  inline bill pay; medic search → dossier → rescue/treat/declare-death
+  (`confirmDeath` requires typing the exact target name); `tryEmsSpawnEnforcement`
+  teleports + `/bridge/ems/hospitalize` on spawn when dead.
+  `HOSPITAL_SPAWN = {x:0,y:80,z:0}` overworld is a **placeholder**.
+
+### Phone (`backend/src/modules/phone/` + migration `029_phone.sql`)
+- Every linked citizen gets a phone number on first use (`09`+8 digits);
+  `phone_numbers/contacts/messages/calls/waypoints/taxi_requests/
+  emergency_calls` tables. Server-authoritative call state machine
+  (ringing→connected→ended/missed, offline callee = missed on the spot,
+  `RING_TIMEOUT_SECONDS` lazy settle). Bank transfer by number via
+  `economy.transfer`. Taxi job board (accept when `phone.taxi.manage`, fare
+  moves requester→driver on completion, cancel while pending). Emergency board
+  (anyone files, dispatchers `phone.emergency.view/manage` close). All writes
+  audited `phone.*`.
+- Bridge: `/bridge/phone/{roles,me,contacts*,messages*,calls*,bank*,gps*,taxi*,
+  emergency*}`; `SelfActionError` maps to **400**, `phoneCall` mapper otherwise
+  mirrors `emsCall`. Admin `/admin/phone/{numbers,emergency,emergency/:id/close,
+  taxi}`; player web `GET /character/phone`; adminWeb "โทรศัพท์" tab; playerWeb
+  phone card.
+- Pack `behavior_pack/scripts/phone_ui.js` (`!phone`): contacts/messages/calls/
+  bank/GPS/taxi/emergency apps; `tryPhoneCallAlert` inbound-ring banner;
+  business app is a placeholder. Wired into `main.js` along with the ems hook
+  (`entityDie` → `/bridge/ems/death` fire-and-forget, `playerSpawn` →
+  `tryEmsSpawnEnforcement` at 40 ticks).
+
+### Integration tests (suite now **29/29** green)
+- New "ems: …" subtest (role flags, non-medic lookup 403 + HIGH security event,
+  name/citizen-id lookup + no-match 404, self down → downed + expiry window,
+  non-medic rescue 403, medic rescue → treated, treat → healthy + bill, wrong
+  state 409, pay debits cash, double-pay 409, cross-pay 403, self death → dead +
+  must-respawn, double death 409, hospitalize → healthy + count 1 + bill,
+  no-pending hospitalize 409, admin records/bills/waive/reset + non-ems 403,
+  `ems.*` audit rows, player web card) and "phone: …" subtest (unlinked 404,
+  roles flags, number format, contacts CRUD + owner-scope delete 404, messages
+  send/read/inbox/outbox + self-message 400, offline missed + online ringing →
+  caller-accept 403 → callee accept → connected → hangup → ended + stray accept
+  409 + history, bank state + transfer (cash moves) + self-transfer 400 + unknown
+  404, GPS add/list/delete + cross-owner 404, taxi board 403 for non-driver +
+  request/accept/double-accept 409/rider-complete 403/cancel/completion pays
+  driver, emergency create/open/own-list/civilian-close 403/dispatcher
+  list/close/double-close 409, player web card, admin surfaces + 403 gating,
+  `phone.*` audit rows).
+- Real bugs found while wiring the tests: ms-level "downed remaining" computed as
+  `ceil((downed_at - Date.now())/1000)` collapsed to 0 because DB `now()` runs a
+  few ms before the JS clock read → remaining now computed from the expiry
+  **deadline**; phone presence `characterId` is a bigint string vs numeric callee
+  → `Number()` compare for the online check; `listEmergencyCalls` unused `$1`
+  param when `includeAll` → 42P18; `/admin/phone/numbers` ordered by
+  `pn.id` which doesn't exist (`phone_numbers` PK is character_id) →
+  `ORDER BY pn.character_id`; getInbox marked read *after* selecting so returned
+  rows showed `read_at` null (update moved first); bridge hospitalize returned
+  `{ medical }` while the module returns `{ record, bill }` (route now returns
+  both).
+
 ## 2026-09-10 Round 10 — Police / MDT (licenses, fines, warrants, reports, arrest-jail)
 
 - New police domain module `backend/src/modules/police/index.ts` (new) +
@@ -531,12 +611,19 @@ patch automation (`tools/leveldat_patch.py`), deploy/backup tooling
 25-test suite), the **housing system** (Round 9 — property module,
 garage-integrated storage/access, `!house` UI, 26-test suite), and the
 **police/MDT system** (Round 10 — licenses/fines/warrants/reports/
-arrest-jail, `!police`/`!mdt` UI, 27-test suite) are all done.
+arrest-jail, `!police`/`!mdt` UI, 27-test suite), the **EMS/emergency system**
+(Round 11 — health state machine + hospital money sink + medic UI, `!ems`/
+`!medic`, 28-test suite) and the **phone app stack** (Round 11 — contacts/SMS/
+calls/bank/GPS/taxi-job-board/911, `!phone`, 29-test suite) are all done.
 Remaining verified-gaps: **live *police* verification** — grant a player the
 `police` role, copy `behavior_pack/scripts/police_ui.js` + the updated
 `main.js` to the BDS side, restart, then exercise the MDT in-world (lookup/
 license/fine/warrant/arrest) and set the real `PRISON_SPAWN` (currently the
-placeholder `{x:0,y:80,z:0}` overworld) before relying on jail respawn; live
+placeholder `{x:0,y:80,z:0}` overworld) before relying on jail respawn; the same
+live pass for **EMS** (grant the `ems` role, copy `ems_ui.js`, set the real
+`HOSPITAL_SPAWN` in `behavior_pack/scripts/ems_ui.js`) and **phone** (`!phone`
+apps, live calls/taxi/911 on a real client — the call online-check + missed
+paths are HTTP-suite covered, exercise them live); live
 vehicle + property verification on a real BDS client with the `vehicle_pack/`
 RP installed (vehicle_ui.js / property_ui.js not yet all copied to BDS);
 real-browser passes of `/admin`, `/player` and the new police admin tab;

@@ -2127,6 +2127,462 @@ test("integration suite", async (t) => {
     assert.ok(Object.keys(byAction).some((a) => a.startsWith("police.license.")), "expected police.license.* audit rows");
   });
 
+  await t.test("ems: down/rescue/treat/death/hospitalize/bill-pay/lookup/admin surfaces", async () => {
+    const bridgePost = async (path: string, body: unknown) => {
+      const raw = JSON.stringify(body);
+      return fetch(`${baseUrl}${path}`, { method: "POST", headers: signedHeaders(BDS_SECRET, raw), body: raw });
+    };
+    const bridgeJson = async (path: string, body: unknown) =>
+      ((await bridgePost(path, body)).json()) as Promise<any>;
+
+    // fresh characters: Medic (ems role) and Pam (civilian patient)
+    const m = await upsertUserByDiscordId("3401", "UserM");
+    const tokenM = await issueSessionToken(m.id);
+    assert.equal((await postAs("/character", { name: "Medic" }, tokenM)).status, 201);
+    const p = await upsertUserByDiscordId("3402", "UserP");
+    const tokenP = await issueSessionToken(p.id);
+    assert.equal((await postAs("/character", { name: "Pam" }, tokenP)).status, 201);
+    for (const [tag, xuid] of [["M", "p-M"], ["P", "p-P"]] as const) {
+      const codeRes = await postAs("/character/link-code", {}, tag === "M" ? tokenM : tokenP);
+      const { code } = await codeRes.json();
+      const raw = JSON.stringify({ code, xuid });
+      assert.equal((await fetch(`${baseUrl}/bridge/character/link`, {
+        method: "POST", headers: signedHeaders(BDS_SECRET, raw), body: raw,
+      })).status, 200);
+    }
+    const charM = Number((await pool.query(`SELECT id FROM characters WHERE persistent_id = 'p-M'`)).rows[0].id);
+    const charP = Number((await pool.query(`SELECT id FROM characters WHERE persistent_id = 'p-P'`)).rows[0].id);
+    await ctx.economy.credit({ characterId: charP, amountCents: 100000, reason: "test seed", actorUserId: p.id, currency: "cash" });
+    await grantRoleByName(pool, m.id, "ems");
+
+    const cashOf = async (cid: number) => Number((await pool.query(
+      `SELECT balance_cents FROM wallets WHERE character_id = $1`, [cid]
+    )).rows[0]?.balance_cents ?? 0);
+
+    // --- base state + role flags
+    const me1 = await bridgeJson("/bridge/ems/me", { playerId: "p-M" });
+    assert.equal(me1.ok, true);
+    assert.equal(me1.mine.healthState, "healthy");
+    assert.equal(me1.roles.canView, true);
+    assert.equal(me1.roles.canManage, true);
+    const meP = await bridgeJson("/bridge/ems/me", { playerId: "p-P" });
+    assert.equal(meP.mine.healthState, "healthy");
+
+    // civilian without RBAC is refused on lookup → HIGH security event
+    const denied = await bridgePost("/bridge/ems/lookup", {
+      playerId: "p-P", actorName: "Pam", actorPersistentId: "p-P", query: "Medic",
+    });
+    assert.equal(denied.status, 403);
+    const sec = (await pool.query(
+      `SELECT COUNT(*)::int AS n FROM security_events WHERE event_type = 'staff_command_forbidden' AND payload->>'command' = 'ems.lookup' AND actor_user_id = $1`,
+      [p.id]
+    )).rows[0];
+    assert.equal(sec.n, 1, "denial must raise a HIGH security event");
+
+    // unknown actor persistentId -> 404
+    assert.equal((await bridgePost("/bridge/ems/lookup", {
+      playerId: "p-M", actorName: "Ghost", actorPersistentId: "p-ghost", query: "Pam",
+    })).status, 404);
+
+    // --- lookup by name + by citizenId (dossier exists even for never-helped citizen)
+    const byName = await bridgeJson("/bridge/ems/lookup", {
+      playerId: "p-M", actorName: "Medic", actorPersistentId: "p-M", query: "Pam",
+    });
+    assert.equal(byName.ok, true);
+    assert.equal(byName.citizen.name, "Pam");
+    assert.equal(byName.citizen.persistentId, "p-P");
+    assert.equal(byName.citizen.record.healthState, "healthy");
+    assert.deepEqual(byName.citizen.bills, []);
+    await pool.query(`UPDATE characters SET citizen_id = 'MED-PAM-001' WHERE id = $1`, [charP]);
+    const byCitizenId = await bridgeJson("/bridge/ems/lookup", {
+      playerId: "p-M", actorName: "Medic", actorPersistentId: "p-M", query: "MED-PAM-001",
+    });
+    assert.equal(byCitizenId.citizen.name, "Pam");
+    // no-match -> 404
+    assert.equal((await bridgePost("/bridge/ems/lookup", {
+      playerId: "p-M", actorName: "Medic", actorPersistentId: "p-M", query: "zzz-no-such-person",
+    })).status, 404);
+
+    // --- self down (player roots) -> downed with expiry window
+    const down = await bridgeJson("/bridge/ems/down", {
+      playerId: "p-P", x: 100, y: 64, z: -200, dimensionId: "overworld",
+    });
+    assert.equal(down.ok, true);
+    assert.equal(down.medical.healthState, "downed");
+    assert.ok(down.medical.downedRemainingSeconds > 0);
+    assert.equal(down.medical.downedLocation.dimension, "overworld");
+    const meDown = await bridgeJson("/bridge/ems/me", { playerId: "p-P" });
+    assert.equal(meDown.mine.healthState, "downed");
+    // a non-medic cannot rescue
+    assert.equal((await bridgePost("/bridge/ems/rescue", {
+      playerId: "p-P", actorName: "Pam", actorPersistentId: "p-P",
+      targetPersistentId: "p-P", targetName: "Pam",
+    })).status, 403);
+
+    // --- medic rescue -> treated, then treat -> healthy + bill (money sink)
+    const rescue = await bridgeJson("/bridge/ems/rescue", {
+      playerId: "p-M", actorName: "Medic", actorPersistentId: "p-M",
+      targetPersistentId: "p-P", targetName: "Pam",
+    });
+    assert.equal(rescue.ok, true);
+    assert.equal(rescue.medical.healthState, "treated");
+    assert.equal(rescue.medical.treatedBy, charM);
+    const treat = await bridgeJson("/bridge/ems/treat", {
+      playerId: "p-M", actorName: "Medic", actorPersistentId: "p-M",
+      targetPersistentId: "p-P", targetName: "Pam",
+    });
+    assert.equal(treat.ok, true);
+    assert.equal(treat.medical.record.healthState, "healthy");
+    const bill = treat.medical.bill;
+    assert.equal(bill.patientId, charP);
+    assert.equal(bill.status, "unpaid");
+    assert.ok(bill.amountCents > 0);
+    // wrong state treat -> 409
+    assert.equal((await bridgePost("/bridge/ems/treat", {
+      playerId: "p-M", actorName: "Medic", actorPersistentId: "p-M",
+      targetPersistentId: "p-P", targetName: "Pam",
+    })).status, 409);
+
+    // --- patient pays the bill through the bridge (cash debited, money sink)
+    assert.equal(await cashOf(charP), 100000);
+    const paid = await bridgeJson("/bridge/ems/bill/pay", { playerId: "p-P", billId: bill.id });
+    assert.equal(paid.ok, true);
+    assert.equal(paid.bill.status, "paid");
+    assert.equal(await cashOf(charP), 100000 - bill.amountCents);
+    assert.equal((await bridgePost("/bridge/ems/bill/pay", { playerId: "p-P", billId: bill.id })).status, 409, "double-pay blocked");
+    // paying someone else's bill -> 403
+    await bridgeJson("/bridge/ems/treat", {
+      playerId: "p-M", actorName: "Medic", actorPersistentId: "p-M",
+      targetPersistentId: "p-P", targetName: "Pam",
+    });
+    // force Pam downed+treated again so treat works
+    await bridgeJson("/bridge/ems/down", { playerId: "p-P" });
+    await bridgeJson("/bridge/ems/rescue", {
+      playerId: "p-M", actorName: "Medic", actorPersistentId: "p-M",
+      targetPersistentId: "p-P", targetName: "Pam",
+    });
+    const treat2 = await bridgeJson("/bridge/ems/treat", {
+      playerId: "p-M", actorName: "Medic", actorPersistentId: "p-M",
+      targetPersistentId: "p-P", targetName: "Pam",
+    });
+    const bill2 = treat2.medical.bill;
+    assert.equal((await bridgePost("/bridge/ems/bill/pay", { playerId: "p-M", billId: bill2.id })).status, 403);
+
+    // --- self-death -> must respawn at hospital -> hospitalize returns to healthy + bill
+    const died = await bridgeJson("/bridge/ems/death", { playerId: "p-P" });
+    assert.equal(died.ok, true);
+    assert.equal(died.medical.healthState, "dead");
+    assert.equal(died.medical.mustRespawnHospital, true);
+    assert.equal((await bridgePost("/bridge/ems/death", { playerId: "p-P" })).status, 409, "already dead");
+    const hos = await bridgeJson("/bridge/ems/hospitalize", { playerId: "p-P" });
+    assert.equal(hos.ok, true);
+    assert.equal(hos.record.healthState, "healthy");
+    assert.equal(hos.record.hospitalizationCount, 1);
+    assert.equal(hos.bill.status, "unpaid");
+    // no pending hospital respawn -> 409
+    assert.equal((await bridgePost("/bridge/ems/hospitalize", { playerId: "p-P" })).status, 409);
+
+    // --- admin surfaces: records search shows Pam; bills list; waive; reset
+    const records = await (await getAs("/admin/ems/records?query=Pam", ctx.tokenA)).json();
+    assert.ok(records.records.some((r: any) => Number(r.id) === charP && r.healthState === "healthy"));
+    const bills = await (await getAs("/admin/ems/bills?status=unpaid", ctx.tokenA)).json();
+    assert.ok(bills.bills.some((b: any) => b.id === hos.bill.id && Number(b.patientId) === charP));
+    // non-ems user cannot use admin ems surface
+    assert.equal((await getAs("/admin/ems/records", tokenP)).status, 403);
+    // waive the hospital bill (ems.admin; owner has it)
+    const waived = await (await postAs(`/admin/ems/bills/${hos.bill.id}/waive`, { reason: "test waiver" }, ctx.tokenA)).json();
+    assert.equal(waived.bill.status, "waived");
+    // reset to healthy is idempotent
+    assert.equal((await postAs(`/admin/ems/reset`, { characterId: charP }, ctx.tokenA)).status, 200);
+    const meAfter = await bridgeJson("/bridge/ems/me", { playerId: "p-P" });
+    assert.equal(meAfter.mine.healthState, "healthy");
+
+    // every mutation wrote an audit row
+    const audits = await pool.query(`SELECT action, COUNT(*)::int AS n FROM audit_log WHERE target_type IN ('character','medical_bill') GROUP BY action`);
+    const byAction = Object.fromEntries(audits.rows.map((a: any) => [a.action, a.n]));
+    for (const action of ["ems.lookup", "ems.down", "ems.rescue", "ems.treat", "ems.death", "ems.hospitalize", "ems.bill.pay", "ems.bill.waive", "ems.reset"]) {
+      assert.ok((byAction[action] ?? 0) >= 1, `expected audit rows for ${action}`);
+    }
+    // player web card reflects the medical state
+    const webMed = await (await getAs("/character/medical", tokenP)).json();
+    assert.equal(webMed.characterId, charP);
+    assert.equal(webMed.medical.healthState, "healthy");
+    assert.ok(webMed.bills.some((b: any) => Number(b.id) === Number(bill2.id) && b.status === "unpaid"),
+      "unpaid bill shows on the player card");
+    assert.ok(!webMed.bills.some((b: any) => Number(b.id) === Number(bill.id)),
+      "paid bill must not show on the player card");
+  });
+
+  await t.test("phone: contacts/messages/calls/bank/gps/taxi/emergency + role gates", async () => {
+    const bridgePost = async (path: string, body: unknown) => {
+      const raw = JSON.stringify(body);
+      return fetch(`${baseUrl}${path}`, { method: "POST", headers: signedHeaders(BDS_SECRET, raw), body: raw });
+    };
+    const bridgeJson = async (path: string, body: unknown) =>
+      ((await bridgePost(path, body)).json()) as Promise<any>;
+
+    // fresh characters: Quinn (gets taxi/emergency role) and Rex (civilian)
+    const q = await upsertUserByDiscordId("3501", "UserQ");
+    const tokenQ = await issueSessionToken(q.id);
+    assert.equal((await postAs("/character", { name: "Quinn" }, tokenQ)).status, 201);
+    const r = await upsertUserByDiscordId("3502", "UserR");
+    const tokenR = await issueSessionToken(r.id);
+    assert.equal((await postAs("/character", { name: "Rex" }, tokenR)).status, 201);
+    for (const [tag, xuid] of [["Q", "p-Q"], ["R", "p-R"]] as const) {
+      const codeRes = await postAs("/character/link-code", {}, tag === "Q" ? tokenQ : tokenR);
+      const { code } = await codeRes.json();
+      const raw = JSON.stringify({ code, xuid });
+      assert.equal((await fetch(`${baseUrl}/bridge/character/link`, {
+        method: "POST", headers: signedHeaders(BDS_SECRET, raw), body: raw,
+      })).status, 200);
+    }
+    const charQ = Number((await pool.query(`SELECT id FROM characters WHERE persistent_id = 'p-Q'`)).rows[0].id);
+    const charR = Number((await pool.query(`SELECT id FROM characters WHERE persistent_id = 'p-R'`)).rows[0].id);
+    await ctx.economy.credit({ characterId: charQ, amountCents: 1000000, reason: "test seed", actorUserId: q.id, currency: "cash" });
+    await ctx.economy.credit({ characterId: charR, amountCents: 10000, reason: "test seed", actorUserId: r.id, currency: "cash" });
+
+    // a dedicated taxi/dispatcher role holding the operator permissions
+    const roleId = Number((await pool.query(
+      `INSERT INTO roles (name, description) VALUES ('taxi_test', 'integration test operator role')
+       ON CONFLICT (name) DO NOTHING RETURNING id`
+    )).rows[0]?.id ?? (await pool.query(`SELECT id FROM roles WHERE name = 'taxi_test'`)).rows[0].id);
+    await pool.query(
+      `INSERT INTO role_permissions (role_id, permission_id)
+       SELECT $1, id FROM permissions WHERE key IN ('phone.taxi.manage','phone.emergency.view','phone.emergency.manage')
+       ON CONFLICT DO NOTHING`,
+      [roleId]
+    );
+    await pool.query(`INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`, [q.id, roleId]);
+
+    const cashOf = async (cid: number) => Number((await pool.query(
+      `SELECT balance_cents FROM wallets WHERE character_id = $1`, [cid]
+    )).rows[0]?.balance_cents ?? 0);
+
+    // unlinked -> 404 on every phone route
+    assert.equal((await bridgePost("/bridge/phone/me", { playerId: "p-nobody" })).status, 404);
+
+    // --- roles + number issued on first use
+    const rolesQ = await bridgeJson("/bridge/phone/roles", { playerId: "p-Q" });
+    assert.equal(rolesQ.roles.canTaxiManage, true);
+    assert.equal(rolesQ.roles.canEmergencyView, true);
+    assert.equal(rolesQ.roles.canEmergencyManage, true);
+    const rolesR = await bridgeJson("/bridge/phone/roles", { playerId: "p-R" });
+    assert.equal(rolesR.roles.canTaxiManage, false);
+    const meQ = await bridgeJson("/bridge/phone/me", { playerId: "p-Q" });
+    assert.match(meQ.mine.number, /^09\d{8}$/);
+    assert.equal(meQ.mine.unreadCount, 0);
+    assert.equal(meQ.mine.healthState, "healthy");
+    assert.equal(meQ.mine.hasTaxiManage, true);
+    const meR = await bridgeJson("/bridge/phone/me", { playerId: "p-R" });
+    assert.match(meR.mine.number, /^09\d{8}$/);
+    const rNumber = meR.mine.number;
+    const qNumber = meQ.mine.number;
+
+    // --- contacts CRUD
+    const add = await bridgeJson("/bridge/phone/contacts/add", {
+      playerId: "p-Q", name: "Rex", number: rNumber, note: "เพื่อน",
+    });
+    assert.equal(add.ok, true);
+    const list = await bridgeJson("/bridge/phone/contacts", { playerId: "p-Q" });
+    assert.equal(list.contacts.length, 1);
+    assert.equal(list.contacts[0].number, rNumber);
+    const updated = await bridgeJson("/bridge/phone/contacts/update", {
+      playerId: "p-Q", contactId: list.contacts[0].id, name: "Rexy", number: rNumber, note: null,
+    });
+    assert.equal(updated.contact.name, "Rexy");
+    // deleting someone else's contact is impossible (owner scope)
+    assert.equal((await bridgePost("/bridge/phone/contacts/delete", {
+      playerId: "p-R", contactId: list.contacts[0].id,
+    })).status, 404);
+    // owner can delete; the address book empties
+    const deleted = await bridgeJson("/bridge/phone/contacts/delete", {
+      playerId: "p-Q", contactId: list.contacts[0].id,
+    });
+    assert.equal(deleted.ok, true);
+    const listAfter = await bridgeJson("/bridge/phone/contacts", { playerId: "p-Q" });
+    assert.equal(listAfter.contacts.length, 0);
+
+    // --- messages: send + mark-read + outbox; self-message blocked
+    const msg = await bridgeJson("/bridge/phone/messages/send", {
+      playerId: "p-Q", toNumber: rNumber, body: "สวัสดี Rex",
+    });
+    assert.equal(msg.ok, true);
+    assert.equal((await bridgePost("/bridge/phone/messages/send", {
+      playerId: "p-Q", toNumber: qNumber, body: "สวัสดี",
+    })).status, 400, "can't message your own number");
+    const unread1 = await bridgeJson("/bridge/phone/me", { playerId: "p-R" });
+    assert.equal(unread1.mine.unreadCount, 1);
+    const inbox = await bridgeJson("/bridge/phone/messages/inbox", { playerId: "p-R" });
+    assert.equal(inbox.messages.length, 1);
+    assert.equal(inbox.messages[0].fromName, "Quinn");
+    assert.ok(inbox.messages[0].readAt, "inbox read marks read");
+    const unread2 = await bridgeJson("/bridge/phone/me", { playerId: "p-R" });
+    assert.equal(unread2.mine.unreadCount, 0);
+    const outbox = await bridgeJson("/bridge/phone/messages/outbox", { playerId: "p-Q" });
+    assert.equal(outbox.messages.length, 1);
+    assert.equal(outbox.messages[0].toName, "Rex");
+
+    // --- calls: offline -> missed; online -> ringing -> accept -> hangup
+    const offlineCall = await bridgeJson("/bridge/phone/calls/initiate", { playerId: "p-Q", toNumber: rNumber });
+    assert.equal(offlineCall.ok, true);
+    assert.equal(offlineCall.call.status, "missed");
+    assert.equal(offlineCall.call.missedReason, "offline");
+    // mark Rex "online" via join + heartbeat, then Quinn calls -> ringing
+    const joinBody = JSON.stringify({ playerId: "p-R", playerName: "Rex" });
+    assert.equal((await fetch(`${baseUrl}/bridge/player/join`, {
+      method: "POST", headers: signedHeaders(BDS_SECRET, joinBody), body: joinBody,
+    })).status, 204);
+    const ringing = await bridgeJson("/bridge/phone/calls/initiate", { playerId: "p-Q", toNumber: rNumber });
+    assert.equal(ringing.call.status, "ringing");
+    // accept must come from the callee; caller accepting -> 403
+    assert.equal((await bridgePost("/bridge/phone/calls/accept", {
+      playerId: "p-Q", callId: ringing.call.id,
+    })).status, 403);
+    const accepted = await bridgeJson("/bridge/phone/calls/accept", { playerId: "p-R", callId: ringing.call.id });
+    assert.equal(accepted.call.status, "connected");
+    assert.ok(accepted.call.acceptedAt);
+    const hung = await bridgeJson("/bridge/phone/calls/hangup", { playerId: "p-Q", callId: ringing.call.id });
+    assert.equal(hung.call.status, "ended");
+    // a stray accept on an ended call -> 409
+    assert.equal((await bridgePost("/bridge/phone/calls/accept", {
+      playerId: "p-R", callId: ringing.call.id,
+    })).status, 409);
+    // another online-to-online call; both parties see the history
+    await bridgeJson("/bridge/phone/calls/initiate", { playerId: "p-Q", toNumber: rNumber });
+    const histQ = await bridgeJson("/bridge/phone/calls/list", { playerId: "p-Q" });
+    assert.ok(histQ.calls.some((c: any) => c.status === "ringing"));
+
+    // --- bank: state + transfer by number (money moves via economy.transfer)
+    const bank = await bridgeJson("/bridge/phone/bank/state", { playerId: "p-Q" });
+    assert.equal(bank.cashCents, 1000000);
+    const transfer = await bridgeJson("/bridge/phone/bank/transfer", {
+      playerId: "p-Q", toNumber: rNumber, amountCents: 2500, currency: "cash", reason: "ค่าแท็กซี่",
+    });
+    assert.equal(transfer.ok, true);
+    assert.equal(transfer.transfer.toName, "Rex");
+    assert.equal(await cashOf(charQ), 1000000 - 2500);
+    assert.equal(await cashOf(charR), 10000 + 2500);
+    assert.equal((await bridgePost("/bridge/phone/bank/transfer", {
+      playerId: "p-Q", toNumber: qNumber, amountCents: 2500, currency: "cash",
+    })).status, 400, "self-transfer blocked");
+    assert.equal((await bridgePost("/bridge/phone/bank/transfer", {
+      playerId: "p-Q", toNumber: "0000000000", amountCents: 1000, currency: "cash",
+    })).status, 404, "unknown number");
+
+    // --- GPS waypoints
+    const wp = await bridgeJson("/bridge/phone/gps/add", {
+      playerId: "p-Q", name: "บ้าน", x: 1, y: 2, z: 3, dimensionId: "overworld",
+    });
+    assert.equal(wp.ok, true);
+    const gps = await bridgeJson("/bridge/phone/gps/list", { playerId: "p-Q" });
+    assert.equal(gps.waypoints.length, 1);
+    assert.equal(gps.waypoints[0].name, "บ้าน");
+    assert.equal((await bridgePost("/bridge/phone/gps/delete", {
+      playerId: "p-R", waypointId: gps.waypoints[0].id,
+    })).status, 404, "cannot delete someone else's waypoint");
+    assert.equal((await bridgeJson("/bridge/phone/gps/delete", { playerId: "p-Q", waypointId: gps.waypoints[0].id })).ok, true);
+
+    // --- taxi: rider requests, driver board gates, accept != own, complete pays
+    // non-driver cannot read the board
+    assert.equal((await bridgePost("/bridge/phone/taxi/list", { playerId: "p-R" })).status, 403);
+    const tReq = await bridgeJson("/bridge/phone/taxi/request", {
+      playerId: "p-R", x: 10, y: 60, z: 20, dimensionId: "overworld",
+      destination: "สนามบิน", fareCents: 5000, currency: "cash",
+    });
+    assert.equal(tReq.ok, true);
+    assert.equal(tReq.taxiRequest.status, "pending");
+    const mineR = await bridgeJson("/bridge/phone/taxi/mine", { playerId: "p-R" });
+    assert.equal(mineR.requests.length, 1);
+    // driver can't take their own request
+    const board = await bridgeJson("/bridge/phone/taxi/list", { playerId: "p-Q" });
+    assert.equal(board.requests.length, 1);
+    assert.equal(board.requests[0].requesterName, "Rex");
+    // give Rex the driver role so he could even try; Quinn takes the job
+    const tAccepted = await bridgeJson("/bridge/phone/taxi/accept", {
+      playerId: "p-Q", taxiRequestId: tReq.taxiRequest.id,
+    });
+    assert.equal(tAccepted.ok, true);
+    assert.equal(tAccepted.taxiRequest.status, "accepted");
+    assert.equal((await bridgePost("/bridge/phone/taxi/accept", {
+      playerId: "p-Q", taxiRequestId: tReq.taxiRequest.id,
+    })).status, 409, "already accepted");
+    // rider cannot complete a trip
+    assert.equal((await bridgePost("/bridge/phone/taxi/complete", {
+      playerId: "p-R", taxiRequestId: tReq.taxiRequest.id,
+    })).status, 403, "only the driver completes");
+    // an idle request can be cancelled by the requester
+const tReq2 = (await bridgeJson("/bridge/phone/taxi/request", {
+          playerId: "p-R", x: 90, y: 64, z: -10, destination: "สนามบิน", fareCents: 3000, currency: "cash",
+        })).taxiRequest;
+    const cancelled = await bridgeJson("/bridge/phone/taxi/cancel", {
+      playerId: "p-R", taxiRequestId: tReq2.id,
+    });
+    assert.equal(cancelled.taxiRequest.status, "cancelled");
+    // complete pays the driver (requester cash -> driver cash)
+    const beforeQ = await cashOf(charQ);
+    const beforeR = await cashOf(charR);
+    const done = await bridgeJson("/bridge/phone/taxi/complete", {
+      playerId: "p-Q", taxiRequestId: tReq.taxiRequest.id,
+    });
+    assert.equal(done.ok, true);
+    assert.equal(done.taxiRequest.status, "completed");
+    assert.equal(await cashOf(charR), beforeR - 5000);
+    assert.equal(await cashOf(charQ), beforeQ + 5000);
+
+    // --- emergency: create by anyone, board only for dispatchers, close by dispatchers
+    const emg = await bridgeJson("/bridge/phone/emergency/create", {
+      playerId: "p-R", category: "ems", subject: "ช่วยด้วยคนหมดสติ", x: 5, y: 60, z: 7,
+    });
+    assert.equal(emg.ok, true);
+    assert.equal(emg.call.status, "open");
+    // civilian sees only their own calls
+    const ownList = await bridgeJson("/bridge/phone/emergency/list", { playerId: "p-R" });
+    assert.equal(ownList.calls.length, 1);
+    // civilian cannot close anything (even their own)
+    assert.equal((await bridgePost("/bridge/phone/emergency/close", {
+      playerId: "p-R", callId: emg.call.id,
+    })).status, 403);
+    // dispatcher sees all open calls + closes
+    const disp = await bridgeJson("/bridge/phone/emergency/list", { playerId: "p-Q" });
+    assert.ok(disp.calls.some((c: any) => Number(c.id) === Number(emg.call.id)));
+    const closed = await bridgeJson("/bridge/phone/emergency/close", {
+      playerId: "p-Q", callId: emg.call.id, note: "รับทราบแล้ว",
+    });
+    assert.equal(closed.call.status, "closed");
+    assert.equal((await bridgePost("/bridge/phone/emergency/close", {
+      playerId: "p-Q", callId: emg.call.id,
+    })).status, 409, "already closed");
+
+    // --- player web phone card
+    const webPhone = await (await getAs("/character/phone", tokenQ)).json();
+    assert.equal(webPhone.phone.number, qNumber);
+    assert.equal(webPhone.phone.hasTaxiManage, true);
+    assert.equal(webPhone.phone.hasEmergencyView, true);
+
+    // --- admin phone surfaces
+    const adminNumbers = await (await getAs("/admin/phone/numbers", ctx.tokenA)).json();
+    assert.ok(adminNumbers.numbers.some((n: any) => n.number === qNumber));
+    const adminEmg = await (await getAs("/admin/phone/emergency?status=closed", ctx.tokenA)).json();
+    assert.ok(adminEmg.calls.some((c: any) => Number(c.id) === Number(emg.call.id)));
+    const adminTaxi = await (await getAs("/admin/phone/taxi", ctx.tokenA)).json();
+    assert.ok(adminTaxi.requests.some((tr: any) => Number(tr.id) === Number(tReq.taxiRequest.id) && tr.status === "completed"));
+    // non-operator cannot read admin phone surfaces
+    assert.equal((await getAs("/admin/phone/numbers", tokenR)).status, 403);
+
+    // every mutation wrote an audit row
+    const audits = await pool.query(`SELECT action, COUNT(*)::int AS n FROM audit_log WHERE action LIKE 'phone.%' GROUP BY action`);
+    const byAction = Object.fromEntries(audits.rows.map((a: any) => [a.action, a.n]));
+    for (const action of [
+      "phone.contact.add", "phone.contact.edit", "phone.contact.delete",
+      "phone.message.send", "phone.call.initiate", "phone.call.accept", "phone.call.hangup",
+      "phone.gps.add", "phone.gps.delete", "phone.taxi.request",
+      "phone.taxi.accept", "phone.taxi.complete", "phone.taxi.cancel",
+      "phone.emergency.create", "phone.emergency.close",
+    ]) {
+      assert.ok((byAction[action] ?? 0) >= 1, `expected audit rows for ${action}`);
+    }
+  });
+
   // cleanup
   await new Promise<void>((resolve) => ctx.server.close(() => resolve()));
   await pool.end();

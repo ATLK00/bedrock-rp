@@ -13,6 +13,8 @@ import {
 } from "./vehicle_ui.js";
 import { tryOpenPropertyUi } from "./property_ui.js";
 import { tryOpenPoliceUi, tryPoliceSpawnEnforcement } from "./police_ui.js";
+import { tryOpenEmsUi, tryEmsSpawnEnforcement } from "./ems_ui.js";
+import { tryOpenPhoneUi } from "./phone_ui.js";
 
 /**
  * IDENTITY NOTE: `world.afterEvents.playerJoin`'s `event.playerId` is
@@ -240,6 +242,28 @@ world.beforeEvents.chatSend.subscribe((event) => {
     return;
   }
 
+  // In-game EMS system (`!ems` / `!medic`).
+  if (tryOpenEmsUi(message, event.sender, {
+    postToBackend,
+    getPersistentId: () => persistentIdByName.get(event.sender.name),
+    getPersistentIdByName: (name) => persistentIdByName.get(name),
+    isConfigured: () => !!cachedBridgeConfig,
+  })) {
+    event.cancel = true; // never hit public chat
+    return;
+  }
+
+  // In-game phone system (`!phone`).
+  if (tryOpenPhoneUi(message, event.sender, {
+    postToBackend,
+    getPersistentId: () => persistentIdByName.get(event.sender.name),
+    getPersistentIdByName: (name) => persistentIdByName.get(name),
+    isConfigured: () => !!cachedBridgeConfig,
+  })) {
+    event.cancel = true; // never hit public chat
+    return;
+  }
+
   if (!lower.startsWith("!link ")) return;
 
   event.cancel = true; // never let this hit public chat, whether it succeeds or fails
@@ -315,6 +339,52 @@ world.afterEvents.playerSpawn.subscribe((event) => {
       isConfigured: () => !!cachedBridgeConfig,
     });
   }, 40); // ~2s after spawn, after the join prompt
+});
+
+/**
+ * EMS hospital enforcement: runs on EVERY spawn (initial join, death respawn,
+ * etc.), mirrors jail enforcement above. If the backend says the citizen must
+ * respawn at the hospital (`mustRespawnHospital`), the pack drags them to the
+ * configured hospital point and fires `/bridge/ems/hospitalize`, which returns
+ * them to healthy and issues the hospital bill.
+ */
+world.afterEvents.playerSpawn.subscribe((event) => {
+  if (!cachedBridgeConfig) return;
+  const persistentId = persistentIdByName.get(event.player.name);
+  if (!persistentId) return;
+  system.runTimeout(() => {
+    tryEmsSpawnEnforcement(event.player, {
+      postToBackend,
+      getPersistentId: () => persistentId,
+      getPersistentIdByName: (name) => persistentIdByName.get(name),
+      isConfigured: () => !!cachedBridgeConfig,
+    });
+  }, 40); // ~2s after spawn, after the join prompt
+});
+
+/**
+ * EMS death reporting: when a player entity dies, self-report to the backend
+ * (`/bridge/ems/death` -> declareDeath selfReport:true). The backend marks the
+ * citizen dead + `mustRespawnHospital`, so their next spawn gets hospital
+ * enforcement above. Fire-and-forget like the join/heartbeat notifies — the
+ * UI flows read the resulting state via `/bridge/ems/me`.
+ */
+world.afterEvents.entityDie.subscribe((event) => {
+  if (!cachedBridgeConfig) return;
+  const dead = event.deadEntity;
+  if (!dead || dead.typeId !== "minecraft:player") return;
+  const persistentId = persistentIdByName.get(dead.name);
+  if (!persistentId) return;
+  postToBackend("/bridge/ems/death", { playerId: persistentId }).then(
+    (response) => {
+      if (response.status < 200 || response.status >= 300) {
+        console.warn(`[bedrock-rp] backend rejected death report: HTTP ${response.status}`);
+      }
+    },
+    (err) => {
+      console.warn(`[bedrock-rp] backend unreachable for death report: ${err}`);
+    }
+  );
 });
 
 /**

@@ -38,7 +38,12 @@ export type DomainEvent =
   | { type: "ADMIN_ACTION"; actorUserId: number | null; action: string }
   | { type: "SECURITY_ALERT"; eventType: string; severity: SecuritySeverity }
   | { type: "CASE_CREATED"; caseId: number; by: number }
-  | { type: "CASE_UPDATED"; caseId: number; by: number };
+  | { type: "CASE_UPDATED"; caseId: number; by: number }
+  // EMS — health-state transitions published so notifications / the phone
+  // realtime layer (MASTER_PROMPT §15) can attach without touching the module.
+  | { type: "PHONE_MEDICAL_CHANGED"; characterId: number; healthState: string }
+  // Phone — call state machine published the same way.
+  | { type: "PHONE_CALL_CHANGED"; callId: number; status: string; callerCharacterId: number; calleeCharacterId: number };
 
 export function publish(event: DomainEvent) {
   bus.emit(event.type, event);

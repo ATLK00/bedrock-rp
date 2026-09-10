@@ -80,6 +80,9 @@ th { color: #9aa4b0; font-weight: 500; }
   background: #0b0f13; border: 1px dashed #3f4a58; border-radius: 8px;
   padding: 12px; margin: 10px 0; text-align: center; }
 .err { color: #f87171; }
+.toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+  background: #1f2937; border: 1px solid #374151; color: #f3f4f6; padding: 10px 16px;
+  border-radius: 10px; z-index: 50; box-shadow: 0 4px 16px rgba(0,0,0,.4); }
 .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
 .spacer { flex: 1; }
 `;
@@ -119,6 +122,11 @@ const APP_JS = `
   }
   function setApp(node) { app.innerHTML = ""; app.appendChild(node); }
   function showErr(el, msg) { el.textContent = msg || ""; }
+  function toast(msg) {
+    var t = el('<div class="toast">' + esc(msg) + '</div>');
+    document.body.appendChild(t);
+    setTimeout(function () { t.remove(); }, 3500);
+  }
 
   async function api(path, opts) {
     var res = await fetch(path, Object.assign({ credentials: "same-origin" }, opts || {}));
@@ -190,6 +198,8 @@ const APP_JS = `
     page.appendChild(el('<div id="garage-card" class="card"><h2>อู่ของคุณ</h2><p class="muted">กำลังโหลด…</p></div>'));
     page.appendChild(el('<div id="property-card" class="card"><h2>อสังหาริมทรัพย์</h2><p class="muted">กำลังโหลด…</p></div>'));
     page.appendChild(el('<div id="police-card" class="card"><h2>สถานะทางกฎหมาย</h2><p class="muted">กำลังโหลด…</p></div>'));
+    page.appendChild(el('<div id="medical-card" class="card"><h2>สถานะสุขภาพ</h2><p class="muted">กำลังโหลด…</p></div>'));
+    page.appendChild(el('<div id="phone-card" class="card"><h2>โทรศัพท์</h2><p class="muted">กำลังโหลด…</p></div>'));
     setApp(page);
 
     // link-code area
@@ -219,7 +229,7 @@ const APP_JS = `
       });
     }
 
-    // wallet + carry + containers + garage + properties + police (parallel)
+    // wallet + carry + containers + garage + properties + police + medical + phone (parallel)
     Promise.all([
       api("/character/wallet"),
       api("/character/inventory"),
@@ -227,14 +237,18 @@ const APP_JS = `
       api("/character/vehicles"),
       api("/character/properties"),
       api("/character/police"),
+      api("/character/medical"),
+      api("/character/phone"),
     ]).then(function (results) {
-      var wallet = results[0], inv = results[1], containers = results[2], garage = results[3], properties = results[4], policeState = results[5];
+      var wallet = results[0], inv = results[1], containers = results[2], garage = results[3], properties = results[4], policeState = results[5], medical = results[6], phoneState = results[7];
       renderWallet(page.querySelector("#wallet-card"), wallet);
       renderCarry(page.querySelector("#carry-card"), inv);
       renderContainers(page.querySelector("#container-card"), containers, page);
       renderGarage(page.querySelector("#garage-card"), garage);
       renderProperties(page.querySelector("#property-card"), properties);
       renderCivil(page.querySelector("#police-card"), policeState);
+      renderMedical(page.querySelector("#medical-card"), medical);
+      renderPhone(page.querySelector("#phone-card"), phoneState);
     });
   }
 
@@ -377,6 +391,59 @@ const APP_JS = `
         });
       });
     });
+  }
+
+  function renderMedical(card, medical) {
+    if (!medical.ok) { card.innerHTML = '<h2>สถานะสุขภาพ</h2><p class="muted">' + esc((medical.data && medical.data.error) || "ไม่พร้อมใช้งาน") + '</p>'; return; }
+    var d = medical.data && medical.data.medical;
+    if (!d) { card.innerHTML = '<h2>สถานะสุขภาพ</h2><p class="muted">ไม่มีข้อมูล</p>'; return; }
+    var stateTag = {
+      healthy: '<span class="tag ok">ปกติ</span>',
+      downed: '<span class="tag warn">ล้มลง</span>',
+      treated: '<span class="tag neutral">พักฟื้น (rescued)</span>',
+      dead: '<span class="tag warn">เสียชีวิต</span>',
+    }[d.healthState] || '<span class="tag neutral">' + esc(d.healthState) + '</span>';
+    var bills = (medical.data.bills || []).filter(function (b) { return b.status === "unpaid"; });
+    var billRows = bills.map(function (b) {
+      return "<tr><td>" + esc(b.reason) + "</td><td>" + money(b.amountCents) + " " + esc(b.currency) + "</td>" +
+        "<td><button class=\\"btn small primary\\" data-billpay=\\"" + b.id + "\\">จ่าย</button></td></tr>";
+    }).join("");
+    card.innerHTML =
+      '<h2>สถานะสุขภาพ</h2>' +
+      '<p>' + stateTag +
+      (d.downedRemainingSeconds != null ? ' <span class="muted">(ล้มลงเมื่อ ' + fmtDate(d.downedAt) + ")</span>" : "") +
+      (d.mustRespawnHospital ? ' <span class="tag warn">ต้องไปเกิด รพ.</span>' : "") + '</p>' +
+      (billRows ? "<table><tr><th>ค่ารักษา</th><th>จำนวน</th><th></th></tr>" + billRows + "</table>"
+        : '<p class="muted">ไม่มีค่ารักษาค้างชำระ</p>');
+    card.querySelectorAll("[data-billpay]").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var id = Number(btn.getAttribute("data-billpay"));
+        if (!confirm("จ่ายค่ารักษา #" + id + " จากกระเป๋าเงิน? (คืนไม่ได้)")) return;
+        btn.disabled = true;
+        api("/character/medical/bills/" + id + "/pay", { method: "POST" }).then(function (r) {
+          btn.disabled = false;
+          toast(r.ok ? "จ่ายแล้ว" : ((r.data && (r.data.error || r.data.message)) || "ไม่สำเร็จ"));
+          api("/character/medical").then(function (next) {
+            renderMedical(card, next);
+            api("/character/wallet").then(function (w) { renderWallet(document.querySelector("#wallet-card"), w); });
+          });
+        });
+      });
+    });
+  }
+
+  function renderPhone(card, phoneState) {
+    if (!phoneState.ok) { card.innerHTML = '<h2>โทรศัพท์</h2><p class="muted">' + esc((phoneState.data && phoneState.data.error) || "ไม่พร้อมใช้งาน") + '</p>'; return; }
+    var d = phoneState.data && phoneState.data.phone;
+    if (!d) { card.innerHTML = '<h2>โทรศัพท์</h2><p class="muted">ไม่มีข้อมูล</p>'; return; }
+    var flags = [];
+    if (d.hasEmergencyView) flags.push('<span class="tag ok">ตัวเลือกเหตุฉุกเฉิน</span>');
+    if (d.hasTaxiManage) flags.push('<span class="tag ok">แท็กซี่</span>');
+    card.innerHTML =
+      '<h2>โทรศัพท์</h2>' +
+      '<p>เบอร์: <strong>' + esc(d.number) + '</strong> · ข้อความที่ยังไม่ได้อ่าน: <strong>' + esc(String(d.unreadCount || 0)) + '</strong></p>' +
+      '<p class="muted">เปิดในเกมด้วยคำสั่ง ' + esc("!phone") + " · สถานะสุขภาพ: <strong>" + esc(d.healthState || "-") + "</strong></p>" +
+      (flags.length ? "<p>" + flags.join(" ") + "</p>" : "");
   }
 
   async function boot() {

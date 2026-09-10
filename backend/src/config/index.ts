@@ -46,6 +46,14 @@ const EnvSchema = z.object({
   // scaling bugs). Default 1,000,000 cents = 10,000 units of the 100-cent
   // base currency.
   ECONOMY_ANOMALY_THRESHOLD_CENTS: z.coerce.number().default(1_000_000),
+  // RP economics + EMS:
+  // A single treatment/hospital charge (MASTER_PROMPT §26 "medical cost").
+  // Billed to the patient on treat/hospitalize as a money sink
+  // (economy.debit, refType 'medical'). Overridable in prod env.
+  MEDICAL_BILL_CENTS: z.coerce.number().default(25000),
+  // How long a downed citizen may stay down before lazily expiring to 'dead'
+  // (checked on read, server clock authoritative — like warrant expiry).
+  EMS_DOWNED_EXPIRY_SECONDS: z.coerce.number().default(900),
   // Append-only tables that grow forever would sink a long-running server.
   // These two jobs sweep them (run daily at startup). Retention windows in
   // DAYS; acknowledged-only for security_events so unresolved threats are

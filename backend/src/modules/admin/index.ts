@@ -15,6 +15,8 @@ import * as security from "../security/index.js";
 import * as vehicleAdmin from "../vehicle/index.js";
 import * as propertyAdmin from "../property/index.js";
 import * as policeAdmin from "../police/index.js";
+import * as emsAdmin from "../ems/index.js";
+import * as phoneAdmin from "../phone/index.js";
 
 /**
  * Admin HTTP routes. Every route:
@@ -1251,6 +1253,206 @@ adminRouter.post("/police/records", requirePermission("police.manage"), async (r
     res.json({ record });
   } catch (err: any) {
     policeAdminError(res, err);
+  }
+});
+
+// ===========================================================================
+// EMS / Medical (web admin surface). Ranking mirrors the bridge:
+// ems.view read, ems.manage write, ems.admin senior actions (waive/reset).
+// ===========================================================================
+
+function emsAdminError(res: any, err: any) {
+  const e = err as any;
+  if (e instanceof emsAdmin.MedicalRecordNotFoundError || e instanceof emsAdmin.BillNotFoundError) {
+    return res.status(404).json({ error: e.message });
+  }
+  if (
+    e instanceof emsAdmin.BillAccessDeniedError ||
+    e instanceof emsAdmin.BillAlreadyPaidError ||
+    e instanceof emsAdmin.StateTransitionError ||
+    e instanceof economy.InsufficientFundsError
+  ) {
+    return res.status(409).json({ error: e.message });
+  }
+  return res.status(500).json({ error: e.message });
+}
+
+async function parseEmsIdOr400(req: any, res: any): Promise<number | null> {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) {
+    res.status(400).json({ error: "medical id must be a positive integer" });
+    return null;
+  }
+  return id;
+}
+
+adminRouter.get("/ems/records", requirePermission("ems.view"), async (req, res) => {
+  try {
+    const limit = Number(req.query.limit ?? 50);
+    const offset = Number(req.query.offset ?? 0);
+    const query = typeof req.query.query === "string" ? req.query.query : undefined;
+    const records = await emsAdmin.listMedicalRecords({
+      query,
+      limit: Number.isFinite(limit) ? Math.max(1, Math.min(limit, 200)) : 50,
+      offset: Number.isFinite(offset) ? Math.max(0, offset) : 0,
+    });
+    res.json({ records });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+adminRouter.get("/ems/records/:id", requirePermission("ems.view"), async (req, res) => {
+  const id = await parseEmsIdOr400(req, res);
+  if (!id) return;
+  try {
+    const record = await emsAdmin.getMedical(id, { actorUserId: req.userId!, requestId: requestIdOf(req) });
+    res.json({ record });
+  } catch (err: any) {
+    emsAdminError(res, err);
+  }
+});
+
+adminRouter.get("/ems/bills", requirePermission("ems.view"), async (req, res) => {
+  try {
+    const limit = Number(req.query.limit ?? 50);
+    const offset = Number(req.query.offset ?? 0);
+    const status = typeof req.query.status === "string" ? req.query.status : undefined;
+    const bills = await emsAdmin.listBills({
+      status,
+      limit: Number.isFinite(limit) ? Math.max(1, Math.min(limit, 200)) : 50,
+      offset: Number.isFinite(offset) ? Math.max(0, offset) : 0,
+    });
+    res.json({ bills });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+adminRouter.get("/ems/bills/:id", requirePermission("ems.view"), async (req, res) => {
+  const id = await parseEmsIdOr400(req, res);
+  if (!id) return;
+  try {
+    const bill = await emsAdmin.getBill(id);
+    res.json({ bill });
+  } catch (err: any) {
+    emsAdminError(res, err);
+  }
+});
+
+/** Pay a specific outstanding medical bill on the citizen's behalf. */
+adminRouter.post("/ems/bills/:id/pay", requirePermission("ems.manage"), async (req, res) => {
+  const id = await parseEmsIdOr400(req, res);
+  if (!id) return;
+  try {
+    const bill = await emsAdmin.getBill(id);
+    if (!bill || bill.status !== "unpaid") return res.status(404).json({ error: "unpaid medical bill not found" });
+    const paid = await emsAdmin.payBill({
+      billId: id,
+      characterId: bill.patientId,
+      actorUserId: req.userId!,
+      requestId: requestIdOf(req),
+    });
+    res.json({ bill: paid });
+  } catch (err: any) {
+    emsAdminError(res, err);
+  }
+});
+
+/** Waive a bill entirely (senior admin; no money moves). */
+adminRouter.post("/ems/bills/:id/waive", requirePermission("ems.admin"), async (req, res) => {
+  const id = await parseEmsIdOr400(req, res);
+  if (!id) return;
+  try {
+    const bill = await emsAdmin.waiveBill({
+      billId: id,
+      actorUserId: req.userId!,
+      requestId: requestIdOf(req),
+    });
+    res.json({ bill });
+  } catch (err: any) {
+    emsAdminError(res, err);
+  }
+});
+
+/** Force a citizen back to healthy (medical emergency triage). */
+adminRouter.post("/ems/reset", requirePermission("ems.admin"), async (req, res) => {
+  const characterId = await parseCharacterIdOr400(req, res);
+  if (!characterId) return;
+  try {
+    const medical = await emsAdmin.adminReset({ characterId, actorUserId: req.userId!, requestId: requestIdOf(req) });
+    res.json({ medical });
+  } catch (err: any) {
+    emsAdminError(res, err);
+  }
+});
+
+// ===========================================================================
+// Phone (web admin + operations). Read = phone.view, write = phone.manage,
+// taxi board ops phone.taxi.manage, emergency dispatch phone.emergency.manage.
+// ===========================================================================
+
+adminRouter.get("/phone/numbers", requirePermission("phone.view"), async (req, res) => {
+  try {
+    const limit = Number(req.query.limit ?? 50);
+    const offset = Number(req.query.offset ?? 0);
+    const query = typeof req.query.query === "string" ? req.query.query : undefined;
+    const { rows } = await pool.query(
+      `SELECT pn.character_id AS "characterId", c.name AS "characterName", pn.number, pn.created_at AS "createdAt"
+       FROM phone_numbers pn JOIN characters c ON c.id = pn.character_id
+       WHERE ($1::text IS NULL OR c.name ILIKE '%' || $1 || '%' OR pn.number ILIKE '%' || $1 || '%')
+       ORDER BY pn.character_id DESC LIMIT $2 OFFSET $3`,
+      [query ?? null, Number.isFinite(limit) ? Math.max(1, Math.min(limit, 200)) : 50, Number.isFinite(offset) ? Math.max(0, offset) : 0]
+    );
+    res.json({ numbers: rows });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+adminRouter.get("/phone/emergency", requirePermission("phone.emergency.view"), async (req, res) => {
+  try {
+    const status = typeof req.query.status === "string" ? req.query.status : undefined;
+    const limit = Number(req.query.limit ?? 50);
+    const calls = await phoneAdmin.listEmergencyCallsForAdmin({
+      status,
+      limit: Number.isFinite(limit) ? Math.max(1, Math.min(limit, 200)) : 50,
+    });
+    res.json({ calls });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+adminRouter.post("/phone/emergency/:id/close", requirePermission("phone.emergency.manage"), async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "emergency call id must be a positive integer" });
+  const note = typeof req.body?.note === "string" ? req.body.note.slice(0, 300) : null;
+  try {
+    const call = await phoneAdmin.closeEmergencyCall({
+      callId: id,
+      responderCharacterId: null,
+      note,
+      actorUserId: req.userId!,
+      requestId: requestIdOf(req),
+    });
+    res.json({ call });
+  } catch (err: any) {
+    const e = err as any;
+    if (e instanceof phoneAdmin.EmergencyCallNotFoundError) return res.status(404).json({ error: e.message });
+    if (e instanceof phoneAdmin.EmergencyNotActionableError) return res.status(409).json({ error: e.message });
+    res.status(500).json({ error: e.message });
+  }
+});
+
+adminRouter.get("/phone/taxi", requirePermission("phone.taxi.manage"), async (req, res) => {
+  try {
+    const status = typeof req.query.status === "string" ? req.query.status : undefined;
+    const limit = Number(req.query.limit ?? 50);
+    const requests = await phoneAdmin.listTaxiRequests(Number.isFinite(limit) ? Math.max(1, Math.min(limit, 200)) : 50, status);
+    res.json({ requests });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
   }
 });
 

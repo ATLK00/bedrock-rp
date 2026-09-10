@@ -65,16 +65,34 @@ audit-logged. Built per `docs/MASTER_PROMPT.md`.
   `/admin/police/*` routes + a web MDT tab; citizens see their own state
   (`GET /character/police`) and pay fines in the player panel or in-game
   (`!police`/`!mdt`).
+- **EMS / emergency services** (`backend/src/modules/ems/`): a server-authoritative
+  health state machine per citizen — `healthy → downed (with expiry) → treated → healthy`, plus `dead`, moves **money out of circulation** with a `MEDICAL_BILL_CENTS`
+  hospital charged on treatment. Citizens self-report down (`/bridge/ems/down`, the
+  pack death hook), medics (role `ems`, perms `ems.view`/`ems.manage`) rescue + treat
+  + declare death, and anyone dead must respawn at the hospital (`/bridge/ems/
+  hospitalize`) which bills them. Medic lookup/dossier is `searchMedical` (by name
+  or citizen id). Admin `/admin/ems/*` (records/bills/waive/reset, `ems.admin`),
+  player web medical card, `!ems`/`!medic` in-game.
+- **Phone / mobile** (`backend/src/modules/phone/`): every linked citizen is
+  auto-issued a phone number on first use, then a server-authoritative app stack
+  — contacts, SMS (`inbox` marks read), a call state machine (ringing/connected/
+  ended/missed, online-aware via presence, no audio in Bedrock), bank transfer by
+  number (`economy.transfer`), GPS waypoints, a **taxi job board** (fare-backed,
+  requester→driver paid on completion; drivers need `phone.taxi.manage`), and a
+  **911-style emergency call** board (dispatch = `phone.emergency.view/manage`,
+  granted to police + ems; admin can close). Bridge `/bridge/phone/*`, admin
+  `/admin/phone/*` (numbers/emergency/taxi), player web phone card, `!phone`
+  in-game. All writes audited (`phone.*` actions).
 - **Admin surface**: audit-log viewer (`GET /admin/audit`, incl. `before/after/reason`),
   multi-currency economy reads (`GET /admin/economy/character/:id`), container CRUD,
   character update/view (locked-field approval path).
 
 Integration suite (`backend/src/test/integration.test.ts`) runs against a throwaway
-`bedrock_rp_test` DB (27 tests: auth, character create/link/delete/details-lock-case,
+`bedrock_rp_test` DB (29 tests: auth, character create/link/delete/details-lock-case,
 bridge secret/signature/replay, presence + stale-heartbeat, RBAC, economy
 cash/bank/red-money/anomaly/idempotency, inventory weight + containers, cases,
 security events, vehicles full lifecycle, properties full lifecycle, police
-lifecycle).
+lifecycle, ems lifecycle, phone lifecycle).
 Spec: `npm run migrate`, `npm run build`, `npm test` (needs `ops` docker stack up).
 
 **Not locked yet** — do not assume:
@@ -335,6 +353,57 @@ the pack is never trusted. Denied attempts → `403` + a HIGH
 Admin MDT: `/admin/police/*` routes + the "ตำรวจ" web tab (reads `police.view`,
 writes `police.manage`, warrant revoke + early release `police.admin`).
 
+## EMS / emergency
+
+Medics use `!ems` / `!medic` (mirrors the police UI conventions). Health state is
+server-authoritative on `medical_records`:
+
+- Every citizen has a dossier (`ensureMedicalRow`, created on first read).
+- `healthy → downed`: the citizen (or medic, via `!medic` dossier) reports them
+  downed — `/bridge/ems/down`; also fired by the pack death hook
+  (`/bridge/ems/death`). A downed player has an expiry window
+  (`EMS_DOWNED_EXPIRY_SECONDS`, 900s) — reading a past-due downed state lazily
+  rolls it to `dead` (spawn enforcement kicks in).
+- `downed → treated`: medic `rescue`; `treated → healthy`: medic `treat` (issues a
+  `MEDICAL_BILL_CENTS` bill, a deliberate money sink — pays via `/bridge/ems/bill/
+  pay` or the player web card).
+- `dead`: must respawn at the hospital. On spawn the pack calls
+  `/bridge/ems/hospitalize` (returned to `healthy`, `hospitalization_count + 1`,
+  hospital bill issued). `HOSPITAL_SPAWN` in `behavior_pack/scripts/ems_ui.js` is
+  a placeholder — set the real hospital point.
+- Medic lookup `!medic → ค้นหา` uses `searchMedical(query)` (name or citizen id),
+  returning the dossier + unpaid bills. Non-medics are refused server-side (HIGH
+  `staff_command_forbidden` event).
+
+Admin EMS: `/admin/ems/*` (`records`, `bills`, `waive`, `reset`; reads
+`ems.view`, writes `ems.manage`/`ems.admin`); player web "หมอ" medical card
+(`GET /character/medical`, inline bill pay).
+
+## Phone / mobile
+
+Every linked citizen is issued a phone number on first use (`/bridge/phone/me`).
+`!phone` opens the app menu — contacts, SMS, calls, bank, GPS, taxi, emergency.
+
+- **Calls** are a server-authoritative state machine (ringing → connected → ended |
+  missed). Calling an offline number records a missed(offline) call immediately;
+  an online callee gets a ringing call they accept/decline from their own phone.
+  `PHONE_CALL_CHANGED` / `PHONE_MEDICAL_CHANGED` eventbus events are the hook for
+  future voice/realtime providers — there is no audio in Bedrock.
+- **Taxi**: anyone requests a ride (pickup coords + destination + fare); drivers
+  (`phone.taxi.manage`) see the job board (`!phone → แท็กซี่`) and accept; on
+  completion the fare moves requester→driver via `economy.transfer`. Cancellable
+  while pending.
+- **Emergency 911**: anyone files an open call (category/coords); dispatch sees
+  the board (`phone.emergency.view`, granted to police + ems + admin) and closes
+  with a note. Admins can close from `/admin/phone/*`.
+- All phone writes are audited (`phone.contact.*`, `phone.message.send`,
+  `phone.call.*`, `phone.gps.*`, `phone.taxi.*`, `phone.emergency.*`).
+
+Admin phone: `/admin/phone/*` (`numbers` directory, `emergency` board + close,
+`taxi` board; reads `phone.view`/`phone.emergency.view`, writes
+`phone.emergency.manage`/`phone.taxi.manage`). Player web "โทรศัพท์" card
+(`GET /character/phone`).
+
 ## Roles & permissions
 
 `005_seed_permissions.sql` seeds four permission keys
@@ -343,7 +412,12 @@ writes `police.manage`, warrant revoke + early release `police.admin`).
 `character.whitelist` only to `moderator`. `027_police.sql` adds
 `police.view` / `police.manage` / `police.admin` (granted to the `admin`
 role, and `police.view`+`police.manage` to a new rank-5 `police` role for
-field officers). `owner` bypasses RBAC checks entirely regardless of grants
+field officers). `028_ems.sql` adds `ems.view` / `ems.manage` / `ems.admin`
+(granted to `admin`, and `ems.view`+`ems.manage` to a new `ems` role for
+medics). `029_phone.sql` adds `phone.view` / `phone.manage` /
+`phone.taxi.manage` / `phone.emergency.view` / `phone.emergency.manage`
+(granted to `admin`; police + ems share the two emergency-dispatch perms).
+`owner` bypasses RBAC checks entirely regardless of grants
 (see `rbac/index.ts`).
 
 - `POST /admin/roles/grant` `{userId, roleName}` — assign a role to a user

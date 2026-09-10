@@ -21,7 +21,10 @@ import { getWalletAndHistory } from "../economy/index.js";
 import { getGarageSummary as getVehicleGarage } from "../vehicle/index.js";
 import { getPropertySummary } from "../property/index.js";
 import { createCase } from "../cases/index.js";
+import { hasPermission } from "../../rbac/index.js";
 import * as police from "../police/index.js";
+import * as ems from "../ems/index.js";
+import * as phone from "../phone/index.js";
 
 export const characterRouter = Router();
 
@@ -290,5 +293,78 @@ characterRouter.post("/fines/:id/pay", async (req, res) => {
     if (err instanceof police.FineAccessDeniedError) return res.status(403).json({ error: err.message });
     if (err instanceof police.FineAlreadyPaidError) return res.status(409).json({ error: err.message });
     return res.status(400).json({ error: err && err.message ? err.message : "payment failed" });
+  }
+});
+
+/** GET /character/medical — own medical state (downed/treated/dead) + outstanding bills. */
+characterRouter.get("/medical", async (req, res) => {
+  const userId = requireUserId(req, res);
+  if (userId === null) return;
+
+  const { rows } = await pool.query(
+    `SELECT id FROM characters WHERE user_id = $1 AND is_deleted = false`,
+    [userId]
+  );
+  if (rows.length === 0) return res.status(404).json({ error: "no character found for this user" });
+
+  try {
+    const { bills, ...medical } = await ems.getMineMedicalState(rows[0].id);
+    res.json({ characterId: Number(rows[0].id), medical, bills: bills.filter((b) => b.status === "unpaid") });
+  } catch (err: any) {
+    return res.status(500).json({ error: err && err.message ? err.message : "failed to load medical state" });
+  }
+});
+
+/** POST /character/medical/bills/:id/pay — pay a medical bill (money sink). */
+characterRouter.post("/medical/bills/:id/pay", async (req, res) => {
+  const userId = requireUserId(req, res);
+  if (userId === null) return;
+  const billId = Number(req.params.id);
+  if (!Number.isInteger(billId) || billId <= 0) {
+    return res.status(400).json({ error: "bill id must be a positive integer" });
+  }
+  const { rows } = await pool.query(
+    `SELECT id FROM characters WHERE user_id = $1 AND is_deleted = false`,
+    [userId]
+  );
+  if (rows.length === 0) return res.status(404).json({ error: "no character found for this user" });
+
+  try {
+    const bill = await ems.payBill({ billId, characterId: Number(rows[0].id), actorUserId: userId, requestId: null });
+    res.json({ characterId: rows[0].id, bill });
+  } catch (err: any) {
+    if (err instanceof ems.BillNotFoundError) return res.status(404).json({ error: err.message });
+    if (err instanceof ems.BillAccessDeniedError) return res.status(403).json({ error: err.message });
+    if (err instanceof ems.BillAlreadyPaidError) return res.status(409).json({ error: err.message });
+    return res.status(400).json({ error: err && err.message ? err.message : "payment failed" });
+  }
+});
+
+/** GET /character/phone — own phone state (number, unread count, role flags). */
+characterRouter.get("/phone", async (req, res) => {
+  const userId = requireUserId(req, res);
+  if (userId === null) return;
+
+  const { rows } = await pool.query(
+    `SELECT id FROM characters WHERE user_id = $1 AND is_deleted = false`,
+    [userId]
+  );
+  if (rows.length === 0) return res.status(404).json({ error: "no character found for this user" });
+
+  try {
+    const [hasEmergencyView, hasEmergencyManage, hasTaxiManage] = await Promise.all([
+      hasPermission(userId, "phone.emergency.view"),
+      hasPermission(userId, "phone.emergency.manage"),
+      hasPermission(userId, "phone.taxi.manage"),
+    ]);
+    const mine = await phone.getPhoneInfo({
+      characterId: rows[0].id,
+      canEmergencyView: hasEmergencyView,
+      canEmergencyManage: hasEmergencyManage,
+      canTaxiManage: hasTaxiManage,
+    });
+    res.json({ characterId: rows[0].id, phone: mine });
+  } catch (err: any) {
+    return res.status(500).json({ error: err && err.message ? err.message : "failed to load phone state" });
   }
 });
