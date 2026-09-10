@@ -1,7 +1,63 @@
 ﻿import jwt from "jsonwebtoken";
-import { randomUUID } from "node:crypto";
+import { randomUUID, randomBytes, scrypt, timingSafeEqual } from "node:crypto";
+import { promisify } from "node:util";
 import { pool } from "../../db/pool.js";
 import { config } from "../../config/index.js";
+
+const scryptAsync = promisify(scrypt);
+
+const PASSWORD_HASH_PREFIX = "scrypt$";
+const PASSWORD_SALT_BYTES = 16;
+const PASSWORD_KEY_BYTES = 64;
+
+/** bcrypt-style stored format: `scrypt$<saltHex>$<hashHex>` — salt is stored
+ * per-user (each hmac run mints its own salt). Uses Node's built-in scrypt
+ * (no native bcrypt dependency, works identically under Electron/pkg). */
+export async function hashPassword(password: string): Promise<string> {
+  const salt = randomBytes(PASSWORD_SALT_BYTES);
+  const key = (await scryptAsync(password, salt, PASSWORD_KEY_BYTES)) as Buffer;
+  return `${PASSWORD_HASH_PREFIX}${salt.toString("hex")}$${key.toString("hex")}`;
+}
+
+export interface PasswordCheckResult {
+  ok: boolean;
+  needsRehash: boolean;
+}
+
+/** Constant-time compare against a stored `scrypt$...` hash. Returns
+ * `needsRehash` so callers can upgrade legacy hashes opportunistically. */
+export async function verifyPassword(password: string, stored: string): Promise<PasswordCheckResult> {
+  if (typeof stored !== "string" || !stored.startsWith(PASSWORD_HASH_PREFIX)) {
+    return { ok: false, needsRehash: false };
+  }
+  const [head, saltHex, keyHex] = stored.split("$");
+  if (head !== "scrypt" || !saltHex || !keyHex) return { ok: false, needsRehash: false };
+  const salt = Buffer.from(saltHex, "hex");
+  const expected = Buffer.from(keyHex, "hex");
+  try {
+    const actual = (await scryptAsync(password, salt, PASSWORD_KEY_BYTES)) as Buffer;
+    const ok =
+      actual.length === expected.length && timingSafeEqual(actual, expected);
+    return { ok, needsRehash: false };
+  } catch {
+    return { ok: false, needsRehash: false };
+  }
+}
+
+/** Find a local (username/password) account row by username. Discord-only
+ * users have `username` NULL and are not findable this way. */
+export async function findUserByUsername(username: string): Promise<{
+  id: number;
+  username: string;
+  password_hash: string;
+  is_banned: boolean;
+} | null> {
+  const { rows } = await pool.query(
+    `SELECT id, username, password_hash, is_banned FROM users WHERE username = $1`,
+    [username]
+  );
+  return rows[0] ?? null;
+}
 
 const DISCORD_API = "https://discord.com/api/v10";
 

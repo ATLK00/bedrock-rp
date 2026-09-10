@@ -113,6 +113,7 @@ Spec: `npm run migrate`, `npm run build`, `npm test` (needs `ops` docker stack u
 ```
 behavior_pack/     BDS behavior pack — scripts run in-game, talk to backend over HTTP
 resource_pack/     stub, empty until content work starts
+app/               Electron desktop admin client (username/password login -> admin panel)
 backend/           Node/TS service — owns DB, RBAC, economy ledger, audit log
 backend/migrations/ raw SQL, run in order, no ORM auto-migrate
 ops/               docker + deploy tooling: dev compose (postgres + redis), prod
@@ -184,16 +185,24 @@ little/big endian. Exit 0 = patched or already correct.
 
 ## Auth flow
 
-1. Player/admin visits `GET /auth/discord/login` → redirected to Discord
+1. Player/admin visits `GET /auth/discord/login`  (redirected to Discord)
 2. Discord redirects back to `GET /auth/discord/callback?code=...`
 3. Backend exchanges the code, upserts `users`, sets an httpOnly JWT
    session cookie. Browsers (Accept: text/html) are then redirected to
-   `GET /player` — API clients still get the `{ok, discordTag}` JSON.
+   `GET /player` - API clients still get the `{ok, discordTag}` JSON.
 4. `/admin/*` routes read `req.userId` from that cookie (via
    `sessionMiddleware`) and then check RBAC permissions per-route
 
 Needs `DISCORD_CLIENT_ID`, `DISCORD_CLIENT_SECRET`, `DISCORD_REDIRECT_URI`,
-and `JWT_SECRET` set in `.env` — see `.env.example`.
+and `JWT_SECRET` set in `.env` - see `.env.example`.
+
+**Local username/password login** (independent of Discord OAuth, used by the
+web admin and the desktop app): `POST /auth/login` `{username, password}`
+against `admin_accounts`, sets a same cookie; `POST /auth/logout`, `GET
+/auth/me`. Username `^[A-Za-z0-9_\-]{3,32}$`, password 8-128, stored as
+salted scrypt (`scrypt$<salt>$<hash>`). Account creation:
+`backend > npm run admin:create -- <username> <password>` (or `--random`).
+Migrations `032_admin_accounts.sql`, `033_ops_permission.sql`.
 
 Sessions are tracked server-side in a `sessions` table (one row per
 issued JWT, keyed by its `jti` claim), not pure stateless JWT. This
@@ -271,6 +280,31 @@ Tabs:
   bill waive, state reset
 - **โทรศัพท์** — phone: assigned numbers, taxi ride log, emergency-call board
   (open/closed)
+- **Ops ระบบ** — server-ops tab (session+RBAC `ops.manage` at `/admin/ops`, the
+  same handlers as `/control`): status (db/redis ping + memory + online players),
+  resources, backups/restore, wipe plan, monitoring/list counts
+
+## Desktop app (Electron)
+
+`app/` is a real desktop admin client (package 3 of the repo; alongside
+`tools/` control EXE and the web admin). Build:
+
+```
+cd app
+npm install            # needs: npm install-scripts approve electron (new npm policy)
+node node_modules/electron/install.js
+npm run dist           # portable + NSIS -> app/dist/
+```
+
+`main.js` does the login in the main process (fetch `POST /auth/login`,
+parses `Set-Cookie`, sets it on `session.defaultSession`), probes
+`GET /admin/ops/status` for a working session, and boots straight into the
+admin panel when the session works, otherwise shows the Thai login page
+(`login.html`). IPC: `control:settings`, `control:set-server`,
+`control:login`, `control:logout`. contextIsolation+sandbox on; navigation
+and `window.open` restricted to the configured server origin; a `401` on any
+`/admin` request bounces back to the login screen. Requires electron-builder
+^26 (v25 fails extracting winCodeSign symlinks on Windows).
 
 It's mounted *before* the rate-limited admin router in `app.ts`
 (`/admin` assets bypass the 60/min limiter; the data calls underneath still

@@ -50,6 +50,54 @@
 ...
 ---
 
+## [2026-09-10 19:00] — AI: big-pickle (opencode) — Local auth login + `/admin/ops` React-to-desktop-admin surface + Electron desktop app
+
+### Task
+- ผู้เล่น/แอดมินเข้าสู่ระบบด้วย username/password ผ่านเว็บแอดมินและแอพเดสก์ท็อป (ไม่พึ่ง Discord OAuth) ขณะที่ control EXE กับ AI ยังใช้ `/control` API เหมือนเดิม
+- โปรเจกต์แบ่งเป็น 3 packages: `tools/` (control EXE + provision), `backend/` (express) และ `app/` (Electron desktop admin อันใหม่) — `app/` เป็น package ที่ 3
+
+### Changed
+- `backend/`: `modules/auth/` -> เพิ่ม `admin_accounts` login (username `^[A-Za-z0-9_\-]{3,32}$`, password 8-128, scrypt salted hash `scrypt$<salt-hex>$<hash-hex>`) + `POST /auth/login|logout|me`; `verifyPassword` แก้บั๊ก head `"scrypt"` (เดิมเทียบ `"scrypt$"` -> login 401 เสมอ)
+- `backend/migrations/032_admin_accounts.sql` (admin_accounts, admin_sessions + cookie cache-control) และ `033_ops_permission.sql` (`ops.manage` ให้ owner) — apply ลง dev DB แล้ว
+- `backend/src/modules/ops/index.ts`: `opsRouter` gate `ops.manage` + actor mapping (`req.controlActorUserId = req.userId` กัน audit แยก actor null) + `GET /status` + mount backup/resource/monitoring/overview routers; mount ใน `app.ts` ที่ `/admin/ops` (หลัง adminLimiter)
+- `backend/src/scripts/createAdmin.ts`: `--random` (password 20 ตัว URL-safe) — admin `allday_admin` (id=45, owner) สร้างแล้ว
+- `backend/src/web/adminWeb.ts`: tab Ops ระบบ (status/backup/wipe/monitoring/overview) — ภายใน template literal ใช้ `\\"` สไตล์เดียวกับของเดิม ห้าม backtick/`${}`
+- `app/` (ใหม่): Electron `main.js` (main-process fetch login, parse Set-Cookie -> `session.cookies.set`, sessionWorks probe, IPC `settings/set-server/login/logout`, webRequest 401-on-`/admin` -> ไปหน้า login, contextIsolation+sandbox, จํากัด navigation เฉพาะ server origin), `preload.js` (`window.bedrockControl`), `login.html` (UI ไทย + CSP); `package.json` electron ^33 (ติดตั้งแล้ว 33.4.11) + electron-builder ^26, target portable + NSIS, appId `th.rp.bedrockcontrol`
+- `.gitignore` เพิ่ม `app/dist/`, `app/node_modules/`
+
+### Why
+- เกม/K8s/Bedrock server ต้องการคนดูแลผ่าน desktop app ที่ล็อกอินจริงจัง; rule ของโปรเจกต์คือ EXE/Web/AI ต้องเข้าผ่าน `/control` แต่ web admin session (RBAC) ใช้ `/admin/ops/*` ที่เรียก handler ชุดเดียวกับ control router — session resource ระหว่าง app กับ admin web แชร์กันได้
+
+### Dependencies / Impact
+- electron-builder อัปเกรดเป็น 26.15.3 / app-builder-bin 4.2.0 (มี fix extract 7z ข้าม symlink บน Windows — electron-builder 25 ติด 7za "Cannot create symbolic link" กับ winCodeSign)
+- Breaking: password login ช่องทางใหม่ ไม่กระทบ Discord OAuth เดิม
+- DB: migrations 032, 033 (run แล้ว)
+
+### Tests
+- [PASS] `backend > npm run build`
+- [PASS] `backend > npm test` = 36 blocks / 36 pass (เพิ่ม 2 blocks: auth login + ops session/RBAC)
+- [PASS] Live dev: login `allday_admin` -> `/admin/ops/status` ok, GETs read-only 200, backup จริง `backup-2026-09-10T11-42-02-850Z.sql` (id=3, 41691 B)
+- [PASS] served `/admin/app.js` node --check + มี `renderOps`
+- [PASS] Electron smoke: `electron.exe` alive 8s no stderr; packaged EXE (`npm run dist`) สร้าง portable 69.1MB + Setup 69.2MB, portable รัน alive 9s
+- [NOT RUN] ครั้งแรก `createAdmin --random` ได้ password เป็น string `--random` (script ยังไม่ support) -> rebuild + รันใหม่ถูกต้อง; exe ไม่รองรับ signing (ไม่มี cert/CI ยังไม่ได้ build app/)
+
+### Security
+- password เก็บเป็น scrypt salt+hash; session cookie `HttpOnly+SameSite=Lax`; `ops.manage` ตรวจ RBAC ทุก route; audit actions ยัง prefix `control.*` กับ actor = operator; navigation/jshell ใน Electron ปิด
+
+### Known Issues
+- EXE ยังไม่ลงชื่อ (unsigned SmartScreen); login ผ่าน web admin ยังเป็น per-username quota เติมได้จาก migration
+- ความละเอียดของ browser.js ที่สร้างแล้วลบทิ้ง: loadLoginPage/loadAdmin ถูก inline ใน main.js
+
+### Next Steps
+- Commit + push + CI; ถ้าอยากได้ Release EXE ของ desktop app -> ต่อ workflow `release.yml`/`ci.yml` ให้ build `app/`
+- ตัวสร้าง password ครั้งแรกที่เพี้ยน (`--random` เป็น literal) ไม่ได้ถูก commit (member อยู่ใน dev DB เดิม `allday_admin` ที่ล็อกอินด้วย password จริงอันใหม่)
+
+### Handoff Notes
+- admin account: `allday_admin` / `CgQqswEw-22Fe1OUOew2` (ID 45, owner) — เก็บไว้ให้ user, แสดงครั้งเดียว
+- `app/` เป็น desktop app ของจริง (ล็อกอิน username/password -> หน้า admin + ops tab) — อยู่บน Desktop+Downloads: `Bedrock RP Control.exe`, `Bedrock RP Control Setup.exe`, shortcut `Bedrock RP Control.lnk`
+
+---
+
 ## [2026-09-10 16:40] — AI: big-pickle (opencode) — CI EXE builds: artifact on every push + GitHub Release on tag
 
 ### Task

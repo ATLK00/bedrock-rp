@@ -2863,6 +2863,85 @@ const tReq2 = (await bridgeJson("/bridge/phone/taxi/request", {
     assert.equal(after.rows[0].n, before.rows[0].n, "overview GET must not write audit rows");
   });
 
+  await t.test("auth: username/password login + local admin account", async () => {
+    const { hashPassword, findUserByUsername } = await import("../modules/auth/index.js");
+    const hash = await hashPassword("correct-horse-battery");
+    const { rows } = await pool.query(
+      `INSERT INTO users (username, discord_tag, password_hash, last_login_at)
+       VALUES ($1, $1, $2, now()) RETURNING id`,
+      ["opsAdmin", hash]
+    );
+    const adminId = Number(rows[0].id);
+    await grantOwnerRole(pool, adminId);
+    ctx.opsAdminId = adminId;
+
+    // wrong username / wrong password -> 401, no session cookie
+    const badUser = await post("/auth/login", { username: "nobody", password: "x".repeat(12) });
+    assert.equal(badUser.status, 401);
+    const badPass = await post("/auth/login", { username: "opsAdmin", password: "wrong-password-123" });
+    assert.equal(badPass.status, 401);
+    assert.equal(badPass.headers.get("set-cookie"), null);
+
+    // valid login -> session cookie + audit row
+    const okRes = await post("/auth/login", { username: "opsAdmin", password: "correct-horse-battery" });
+    assert.equal(okRes.status, 200);
+    const setCookie = okRes.headers.get("set-cookie") ?? "";
+    const fullCookie = setCookie.split(";")[0];
+    assert.ok(fullCookie.startsWith("bedrock_rp_session="), "login must issue the shared session cookie");
+    ctx.opsToken = fullCookie.slice("bedrock_rp_session=".length);
+
+    // the session verifies like any other (owner role bypasses permission checks)
+    const overview = await fetch(`${baseUrl}/admin/ops/overview`, { headers: { cookie: fullCookie } });
+    assert.equal(overview.status, 200);
+
+    const loginAudit = await pool.query(
+      `SELECT count(*)::int AS n FROM audit_log WHERE action = 'auth.login' AND actor_user_id = $1`,
+      [adminId]
+    );
+    assert.equal(loginAudit.rows[0].n, 1, "successful username/password login is audited");
+  });
+
+  await t.test("ops: session+RBAC server-ops surface (backups/status/monitoring/overview)", async () => {
+    // no session -> 401 (requirePermission)
+    assert.equal((await get("/admin/ops/status")).status, 401);
+    assert.equal((await get("/admin/ops/overview")).status, 401);
+
+    // session but no ops rights -> 403
+    const noRightUser = await pool.query(
+      `INSERT INTO users (username, discord_tag, password_hash) VALUES ('plainStaff', 'plainStaff', $1) RETURNING id`,
+      ["no-op-hash"]
+    );
+    const noRightId = Number(noRightUser.rows[0].id);
+    const noRightToken = await issueSessionToken(noRightId);
+    assert.equal((await getAs("/admin/ops/status", noRightToken)).status, 403);
+
+    // owner-role local admin (created in the login test) has full ops access
+    const gets: [string, any?][] = [
+      ["/admin/ops/status", undefined],
+      ["/admin/ops/monitoring", undefined],
+      ["/admin/ops/overview", undefined],
+      ["/admin/ops/backups", undefined],
+      ["/admin/ops/resources", undefined],
+    ];
+    for (const [p] of gets) {
+      const res = await getAs(p, ctx.opsToken);
+      assert.equal(res.status, 200, `GET ${p} must be allowed for ops admin`);
+    }
+    const st = await (await getAs("/admin/ops/status", ctx.opsToken)).json();
+    assert.equal(st.ok, true);
+    assert.equal(st.dependencies.database.ok, true);
+
+    // a mutating ops action via session works and is audited under the control namespace
+    const created = await (await postAs("/admin/ops/backups", { note: "ops-session backup" }, ctx.opsToken)).json();
+    assert.equal(created.ok, true);
+    assert.ok(created.id > 0);
+    const opAudit = await pool.query(
+      `SELECT count(*)::int AS n FROM audit_log WHERE action = 'control.backup.create' AND actor_user_id = $1`,
+      [ctx.opsAdminId]
+    );
+    assert.equal(opAudit.rows[0].n, 1, "ops backup create must be audited with the logged-in operator");
+  });
+
   await t.test("control: backup / wipe (dry-run+confirm) / restore", async () => {
     const cget = (p: string) => get(p, { "x-control-api-key": CONTROL_KEY });
     const cpost = (p: string, body?: unknown) =>

@@ -110,10 +110,10 @@ const APP_JS = `
     return;
   }
 
-  var TABS = ["overview", "users", "characters", "shop", "cases", "audit", "security", "roles", "vehicles", "properties", "police", "medical", "phone"];
+  var TABS = ["overview", "users", "characters", "shop", "cases", "audit", "security", "roles", "vehicles", "properties", "police", "medical", "phone", "ops"];
   var LABELS = { overview: "ภาพรวม", users: "ผู้เล่น", characters: "ตัวละคร",
     shop: "ร้านค้า", cases: "เคส", audit: "Audit", security: "Security", roles: "Roles", vehicles: "รถยนต์",
-    properties: "อสังหาริมทรัพย์", police: "ตำรวจ", medical: "EMS/การแพทย์", phone: "โทรศัพท์" };
+    properties: "อสังหาริมทรัพย์", police: "ตำรวจ", medical: "EMS/การแพทย์", phone: "โทรศัพท์", ops: "Ops ระบบ" };
 
   function el(html) {
     var d = document.createElement("div");
@@ -181,7 +181,7 @@ const APP_JS = `
       shop: renderShop, cases: renderCases, audit: renderAudit,
       security: renderSecurity, roles: renderRoles, vehicles: renderVehicles,
       properties: renderProperties, police: renderPolice,
-      medical: renderMedical, phone: renderPhone,
+      medical: renderMedical, phone: renderPhone, ops: renderOps,
     };
     renderers[name](page);
   }
@@ -224,6 +224,159 @@ const APP_JS = `
       });
     });
     page.appendChild(ops);
+  }
+
+  // ------------------------------------------------ ops / system
+  var _wipe = null; // { token, plan, reqPass, ttl } from a wipe dry-run
+
+  function fmtBytes(n) {
+    n = Number(n || 0);
+    if (n >= 1048576) return (n / 1048576).toFixed(1) + " MB";
+    if (n >= 1024) return (n / 1024).toFixed(1) + " KB";
+    return n + " B";
+  }
+
+  function renderOps(page) {
+    page.innerHTML = "";
+    var card = el("<div class=\\"card\\"><h2>สถานะระบบ</h2><div id=\\"opstat\\"><p class=\\"muted\\">กำลังโหลด…</p></div>" +
+      "<div class=\\"row\\"><button id=\\"op-refresh\\" class=\\"btn\\">รีเฟรช</button>" +
+      "<button id=\\"op-mkbk\\" class=\\"btn primary\\">สร้าง backup</button>" +
+      "<button id=\\"op-wipe\\" class=\\"btn danger\\">Wipe (dry-run)</button></div></div>");
+    page.appendChild(card);
+    var statBox = card.querySelector("#opstat");
+    card.querySelector("#op-refresh").addEventListener("click", function (e) {
+      var b = e.currentTarget; b.disabled = true;
+      api("/admin/ops/status").then(function (r) { b.disabled = false; drawStatus(r, statBox); })
+        .catch(function () { b.disabled = false; statBox.innerHTML = errBox("ล่ม"); });
+    });
+    card.querySelector("#op-mkbk").addEventListener("click", function (e) {
+      var b = e.currentTarget; b.disabled = true;
+      postJSON("/admin/ops/backups", { note: "created from admin panel" }).then(function (r) {
+        b.disabled = false;
+        if (r.ok) { toast("backup #" + r.data.id + " — " + r.data.filename); renderOps(page); }
+        else toast((r.data && r.data.error) || "backup failed");
+      });
+    });
+    card.querySelector("#op-wipe").addEventListener("click", function (e) {
+      var b = e.currentTarget; b.disabled = true;
+      postJSON("/admin/ops/wipe/dry-run", {}).then(function (r) {
+        b.disabled = false;
+        if (r.ok) {
+          _wipe = { token: r.data.confirmationToken, plan: r.data.plan, reqPass: r.data.requiresPassphrase, ttl: r.data.tokenTtlSeconds };
+          drawWipePlan(page);
+          toast("dry-run: " + r.data.plan.users + " users / " + r.data.plan.tables + " tables");
+        } else toast((r.data && r.data.error) || "dry-run failed");
+      });
+    });
+    api("/admin/ops/status").then(function (r) { drawStatus(r, statBox); });
+    api("/admin/ops/backups").then(function (r) { drawBackups(r, page); });
+    api("/admin/ops/monitoring").then(function (r) { drawMonitoring(r, page); });
+    api("/admin/ops/overview").then(function (r) { drawOverviewCounts(r, page); });
+  }
+
+  function drawStatus(r, box) {
+    if (!r.ok) { box.innerHTML = errBox((r.data && r.data.error) || "failed"); return; }
+    var s = r.data, dep = s.dependencies || {}, proc = s.process || {};
+    var rows = [
+      ["database", dep.database ? (dep.database.ok ? "<span class=\\"ok\\">ok</span> " + (dep.database.latencyMs == null ? "?" : dep.database.latencyMs) + "ms" : "<span class=\\"err\\">DOWN</span>") : "?"],
+      ["redis", dep.redis ? (dep.redis.ok ? "<span class=\\"ok\\">ok</span> " + (dep.redis.latencyMs == null ? "?" : dep.redis.latencyMs) + "ms" : "<span class=\\"err\\">DOWN</span>") : "?"],
+      ["ผู้เล่นออนไลน์", s.onlinePlayerCount],
+      ["uptime", Math.floor((proc.uptimeSeconds || 0) / 60) + " นาที"],
+      ["version", s.app + " " + s.version],
+      ["memory rss", fmtBytes(proc.memory && proc.memory.rssBytes)],
+    ];
+    box.innerHTML = "<table>" + rows.map(function (r2) {
+      return "<tr><th>" + r2[0] + "</th><td>" + r2[1] + "</td></tr>";
+    }).join("") + "</table>";
+  }
+
+  function drawBackups(r, page) {
+    var card = el("<div class=\\"card\\"><h2>Backups</h2><div id=\\"opbks\\">" + (r.ok ? "<p class=\\"muted\\">…</p>" : errBox((r.data && r.data.error) || "failed")) + "</div></div>");
+    page.appendChild(card);
+    if (!r.ok) return;
+    var box = card.querySelector("#opbks");
+    var list = r.data.backups || [];
+    if (!list.length) { box.innerHTML = "<p class=\\"muted\\">ยังไม่มี backup</p>"; return; }
+    box.innerHTML = "<table><tr><th>#</th><th>file</th><th>size</th><th>เมื่อ</th><th>status</th><th></th></tr>" +
+      list.map(function (b) {
+        return "<tr><td>" + b.id + "</td><td class=\\"mono\\">" + esc(b.filename) + "</td><td>" + fmtBytes(b.sizeBytes) + "</td><td>" + fmtDate(b.createdAt) + "</td><td>" + esc(b.status) + "</td>" +
+          "<td><button class=\\"btn secondary opts\\" data-id=\\"" + b.id + "\\" data-act=\\"verify\\">verify</button> " +
+          "<button class=\\"btn secondary opts\\" data-id=\\"" + b.id + "\\" data-act=\\"restore\\">restore</button></td></tr>";
+      }).join("") + "</table>";
+    box.querySelectorAll(".opts").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var id = btn.getAttribute("data-id"), act = btn.getAttribute("data-act");
+        if (act === "restore" && !confirm("Restore backup #" + id + "? ข้อมูลปัจจุบันจะถูกแทนด้วย snapshot นี้ทั้งหมด")) return;
+        btn.disabled = true;
+        postJSON("/admin/ops/backups/" + id + "/" + act, {}).then(function (rr) {
+          btn.disabled = false;
+          if (rr.ok) {
+            if (act === "restore") { toast("restore #" + id + " ok — " + rr.data.restoredAt); renderOps(page); }
+            else if (rr.data && rr.data.ok === false) toast((rr.data.error) || "verify failed");
+            else toast("verify #" + id + ": checksum " + (rr.data.checksumMatch ? "match" : "MISMATCH") + " / parse " + (rr.data.parseOk ? "ok" : "FAIL"));
+          } else toast((rr.data && rr.data.error) || (act + " failed"));
+        });
+      });
+    });
+  }
+
+  function drawWipePlan(page) {
+    if (!_wipe) return;
+    var w = _wipe;
+    var card = el("<div class=\\"card\\"><h2>Wipe — ยืนยันการลบ</h2><div class=\\"row\\">" +
+      "<select id=\\"wmode\\"><option value=\\"schema\\">schema — reset โครงสร้าง (auto snapshot ก่อน)</option><option value=\\"data\\">data — ล้างข้อมูลตาราง</option></select>" +
+      (w.reqPass ? "<input id=\\"wpass\\" type=\\"password\\" placeholder=\\"passphrase\\">" : "") +
+      "<button id=\\"wgo\\" class=\\"btn danger\\">ยืนยัน Wipe</button></div>" +
+      "<p class=\\"muted\\">plan: " + w.plan.tables + " tables, " + w.plan.users + " users, " + w.plan.characters + " characters · token อายุ " + w.ttl + " วิ</p></div>");
+    page.appendChild(card);
+    card.querySelector("#wgo").addEventListener("click", function (e) {
+      var btn = e.currentTarget;
+      if (!confirm("เตรียมลบข้อมูลจริงๆ? ระบบจะถ่าย snapshot? ก่อน")) return;
+      btn.disabled = true;
+      var body = { confirmationToken: w.token, mode: card.querySelector("#wmode").value, autoBackup: true };
+      if (w.reqPass) body.passphrase = card.querySelector("#wpass").value;
+      postJSON("/admin/ops/wipe/confirm", body).then(function (r) {
+        btn.disabled = false;
+        _wipe = null;
+        if (r.ok) { toast("wipe ok — auto snapshot backup #" + r.data.autoBackupBackupId); renderOps(page); }
+        else toast((r.data && r.data.error) || "wipe failed");
+      });
+    });
+  }
+
+  function drawMonitoring(r, page) {
+    var card = el("<div class=\\"card\\"><h2>Monitoring</h2><div id=\\"opmon\\">" + (r.ok ? "" : errBox((r.data && r.data.error) || "failed")) + "</div></div>");
+    page.appendChild(card);
+    if (!r.ok) return;
+    var m = r.data, rows = [];
+    var deps = m.services || {};
+    rows.push(["db ok", deps.database ? deps.database.ok : "?"]);
+    rows.push(["redis ok", deps.redis ? deps.redis.ok : "?"]);
+    rows.push(["ออนไลน์", (m.playersOnline && m.playersOnline.count) || 0]);
+    rows.push(["process uptime (s)", m.process && m.process.uptimeSeconds]);
+    rows.push(["host uptime (s)", m.host && m.host.uptimeSeconds]);
+    card.querySelector("#opmon").innerHTML = "<table>" + rows.map(function (r2) {
+      return "<tr><th>" + r2[0] + "</th><td>" + esc(r2[1]) + "</td></tr>";
+    }).join("") + "</table>";
+  }
+
+  function drawOverviewCounts(r, page) {
+    var card = el("<div class=\\"card\\"><h2>ภาพรวมทุกโดเมน</h2><div id=\\"opov\\">" + (r.ok ? "" : errBox((r.data && r.data.error) || "failed")) + "</div></div>");
+    page.appendChild(card);
+    if (!r.ok) return;
+    var ov = r.data, rows = [];
+    rows.push(["user", ov.core && ov.core.users]);
+    rows.push(["ตัวละคร", ov.core && ov.core.characters]);
+    rows.push(["wallets", ov.core && ov.core.wallets]);
+    rows.push(["สินค้าใน shop", ov.shop && ov.shop.listings]);
+    rows.push(["รถ (total/ขาย)", (ov.vehicles && ov.vehicles.total) + " / " + (ov.vehicles && ov.vehicles.forSale)]);
+    rows.push(["อสังหา (total/ขาย)", (ov.properties && ov.properties.total) + " / " + (ov.properties && ov.properties.forSale)]);
+    rows.push(["backup records", ov.ops && ov.ops.backups]);
+    rows.push(["resources", ov.ops && ov.ops.resources]);
+    rows.push(["audit entries", ov.ops && ov.ops.auditEntries]);
+    card.querySelector("#opov").innerHTML = "<table>" + rows.map(function (r2) {
+      return "<tr><th>" + r2[0] + "</th><td>" + esc(r2[1]) + "</td></tr>";
+    }).join("") + "</table>";
   }
 
   // ------------------------------------------------ users

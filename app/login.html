@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'">
+<title>Bedrock RP Control — Login</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    background: #0d1117; color: #e6edf3; margin: 0; min-height: 100vh;
+    display: flex; align-items: center; justify-content: center; }
+  .box { background: #161b22; border: 1px solid #262d36; border-radius: 12px;
+    padding: 26px 28px; width: 360px; }
+  h1 { font-size: 16px; margin: 0 0 4px; }
+  p.sub { color: #8b949e; font-size: 12px; margin: 0 0 18px; }
+  label { display: block; font-size: 12px; color: #8b949e; margin: 12px 0 4px; }
+  input { width: 100%; padding: 9px 11px; border-radius: 8px;
+    border: 1px solid #30363d; background: #0d1117; color: #eee; font-size: 14px; }
+  input:focus { outline: 1px solid #1f6feb; }
+  button { width: 100%; margin-top: 18px; padding: 10px; border: 0; border-radius: 8px;
+    background: #1f6feb; color: #fff; font-size: 14px; cursor: pointer; }
+  button:disabled { opacity: .5; cursor: default; }
+  .err { margin-top: 12px; color: #f85149; font-size: 13px; display: none; }
+  .ok  { margin-top: 12px; color: #3fb950; font-size: 13px; display: none; }
+</style>
+</head>
+<body>
+<div class="box">
+  <h1>Bedrock RP Control</h1>
+  <p class="sub">เข้าสู่ระบบจัดการเซิร์ฟเวอร์</p>
+
+  <label for="server">ที่อยู่เซิร์ฟเวอร์</label>
+  <input id="server" type="text" spellcheck="false" autocomplete="off" placeholder="http://127.0.0.1:8080">
+
+  <label for="user">Username</label>
+  <input id="user" type="text" spellcheck="false" autocomplete="username">
+
+  <label for="pass">รหัสผ่าน</label>
+  <input id="pass" type="password" autocomplete="current-password">
+
+  <button id="go">เข้าสู่ระบบ</button>
+  <p class="err" id="err"></p>
+  <p class="ok" id="oktext"></p>
+</div>
+<script>
+  (function () {
+    var els = { server: document.getElementById('server'), user: document.getElementById('user'),
+      pass: document.getElementById('pass'), go: document.getElementById('go'),
+      err: document.getElementById('err'), oktext: document.getElementById('oktext') };
+
+    function setError(msg) {
+      els.err.textContent = msg || '';
+      els.err.style.display = msg ? 'block' : 'none';
+      els.oktext.style.display = 'none';
+    }
+    function setOk(msg) {
+      els.oktext.textContent = msg || '';
+      els.oktext.style.display = msg ? 'block' : 'none';
+      els.err.style.display = 'none';
+    }
+
+    window.bedrockControl.getSettings().then(function (s) {
+      if (s && s.serverUrl) els.server.value = s.serverUrl;
+    });
+
+    els.go.addEventListener('click', async function () {
+      var server = els.server.value.trim();
+      var user = els.user.value.trim();
+      var pass = els.pass.value;
+      if (!user || !pass) { setError('กรอก username และรหัสผ่าน'); return; }
+      els.go.disabled = true;
+      setError('');
+      setOk('กำลังเชื่อมต่อ…');
+      var set = await window.bedrockControl.setServer(server);
+      if (!set.ok) { setError(set.error); els.go.disabled = false; return; }
+      var r = await window.bedrockControl.login(user, pass);
+      if (!r.ok) { setError(r.error); els.go.disabled = false; return; }
+      // success => main process navigates to the admin panel; nothing to do here
+      setOk('เข้าสู่ระบบสำเร็จ…');
+    });
+    els.pass.addEventListener('keydown', function (ev) {
+      if (ev.key === 'Enter') els.go.click();
+    });
+  })();
+</script>
+</body>
+</html>

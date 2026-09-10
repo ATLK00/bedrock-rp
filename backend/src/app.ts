@@ -2,6 +2,7 @@ import express from "express";
 import cookieParser from "cookie-parser";
 import { config } from "./config/index.js";
 import { adminRouter } from "./modules/admin/index.js";
+import { opsRouter } from "./modules/ops/index.js";
 import { authRouter } from "./modules/auth/routes.js";
 import { sessionMiddleware } from "./modules/auth/index.js";
 import { bridgeRouter } from "./modules/bridge/index.js";
@@ -143,6 +144,11 @@ export function createApp(): express.Express {
   // limited + RBAC-guarded /admin JSON routes below.
   app.use("/admin", adminWebRouter);
   app.use("/admin", adminLimiter, adminRouter);
+
+  // Session-authenticated server-ops surface (backups/wipe/resources/
+  // monitoring/overview/status) — reuse of the control handlers behind
+  // RBAC `ops.manage` instead of the API key. See modules/ops/index.ts.
+  app.use("/admin/ops", adminLimiter, opsRouter);
 
   // Player-facing web. Mounted after the JSON/routers (same-origin, no
   // rate limit — it's static + reuses the session-authenticated routes).

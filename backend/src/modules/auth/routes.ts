@@ -1,11 +1,21 @@
 import { Router, type Request, type Response } from "express";
 import { config } from "../../config/index.js";
-import { exchangeDiscordCode, issueSessionToken, setSessionCookie, revokeSession } from "./index.js";
+import {
+  exchangeDiscordCode,
+  findUserByUsername,
+  verifyPassword,
+  issueSessionToken,
+  setSessionCookie,
+  revokeSession,
+} from "./index.js";
 import jwt from "jsonwebtoken";
 import { randomBytes } from "node:crypto";
 import { emitSecurityEvent } from "../security/index.js";
+import { pool } from "../../db/pool.js";
 
 export const authRouter = Router();
+
+const USERNAME_RE = /^[A-Za-z0-9_\-]{3,32}$/;
 
 // OAuth state: a random value minted at login, echoed back on the
 // callback. This prevents login CSRF (an attacker initiating a login with
@@ -142,6 +152,75 @@ authRouter.get("/discord/callback", async (req, res) => {
     // full error still goes to the server log for debugging.
     console.error("[auth] discord callback failed", err);
     res.status(401).json({ error: "login failed" });
+  }
+});
+
+/**
+ * Username/password login for local admin accounts (created via the
+ * `admin:create` bootstrap script). Success issues the same JWT session
+ * cookie as the Discord flow, so every existing session/RBAC surface
+ * (web admin, player panel, /admin) works unchanged. Failure paths emit
+ * Security Center events mirroring the Discord login failure handling.
+ * Rate-limited via authLimiter (10 req / 15 min) in app.ts, like every
+ * other /auth route.
+ */
+authRouter.post("/login", async (req, res) => {
+  const username = typeof req.body?.username === "string" ? req.body.username.trim() : "";
+  const password = typeof req.body?.password === "string" ? req.body.password : "";
+  const requestId = (req as unknown as { requestId?: string }).requestId ?? null;
+
+  if (!USERNAME_RE.test(username) || password.length === 0 || password.length > 256) {
+    return res.status(400).json({ error: "invalid username or password" });
+  }
+
+  try {
+    const user = await findUserByUsername(username);
+    if (!user) {
+      await emitSecurityEvent({
+        eventType: "login_failure",
+        severity: "LOW",
+        ip: req.ip ?? null,
+        requestId,
+        payload: { method: "username", username, detail: "unknown username" },
+      }).catch(() => {});
+      return res.status(401).json({ error: "invalid username or password" });
+    }
+
+    if (user.is_banned) {
+      await emitSecurityEvent({
+        eventType: "login_banned_account",
+        severity: "MEDIUM",
+        ip: req.ip ?? null,
+        requestId,
+        payload: { method: "username", username },
+      }).catch(() => {});
+      return res.status(403).json({ error: "account is banned" });
+    }
+
+    const check = await verifyPassword(password, user.password_hash);
+    if (!check.ok) {
+      await emitSecurityEvent({
+        eventType: "login_failure",
+        severity: "LOW",
+        ip: req.ip ?? null,
+        requestId,
+        payload: { method: "username", username, detail: "wrong password" },
+      }).catch(() => {});
+      return res.status(401).json({ error: "invalid username or password" });
+    }
+
+    await pool.query(`UPDATE users SET last_login_at = now() WHERE id = $1`, [user.id]);
+    const token = await issueSessionToken(user.id);
+    setSessionCookie(res, token);
+    await pool.query(
+      `INSERT INTO audit_log (actor_user_id, action, target_type, target_id, payload, result)
+       VALUES ($1, 'auth.login', 'user', $2, $3, 'success')`,
+      [user.id, String(user.id), JSON.stringify({ method: "username" })]
+    );
+    res.json({ ok: true });
+  } catch (err: any) {
+    console.error("[auth] username/password login failed", err);
+    res.status(500).json({ error: "login failed" });
   }
 });
 

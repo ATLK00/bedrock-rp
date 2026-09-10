@@ -1,0 +1,41 @@
+{
+  "name": "bedrock-rp-control",
+  "version": "1.0.0",
+  "description": "Desktop control app (username/password login) for the bedrock-rp backend admin panel + server ops.",
+  "main": "main.js",
+  "author": "bedrock-rp",
+  "license": "UNLICENSED",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win",
+    "dist:linux": "electron-builder --linux"
+  },
+  "devDependencies": {
+    "app-builder-bin": "^4.2.0",
+    "electron": "^33.2.0",
+    "electron-builder": "^26.15.3"
+  },
+  "build": {
+    "appId": "th.rp.bedrockcontrol",
+    "productName": "Bedrock RP Control",
+    "files": [
+      "main.js",
+      "preload.js",
+      "login.html",
+      "package.json"
+    ],
+    "directories": {
+      "output": "dist"
+    },
+    "win": {
+      "target": [
+        "portable",
+        "nsis"
+      ]
+    }
+  },
+  "allowScripts": {
+    "electron@33.4.11": true
+  }
+}

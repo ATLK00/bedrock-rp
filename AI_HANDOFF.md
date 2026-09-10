@@ -7,6 +7,33 @@
   real infrastructure; a small set of infrastructure-dependent paths remains
   explicitly unverified (listed below under **Unverified**).
 
+## 2026-09-10 Round 14 — Local auth login + `/admin/ops` Web/desktop-admin surface + Electron desktop app
+
+New 3rd package `app/` (Electron desktop admin), on top of Rounds 12-13 control plane.
+
+- **Local login** (`backend/src/modules/auth/`): `admin_accounts` (username
+  `^[A-Za-z0-9_\-]{3,32}$`, password 8-128, salted scrypt `scrypt$<salt>$<hash>`),
+  `admin_sessions` cookie session (HttpOnly+SameSite), `POST /auth/login|logout|me`,
+  migration `032_admin_accounts.sql`. Note: `verifyPassword` previously compared
+  against `"scrypt$"` after splitting on `$` — a valid login returned 401; fixed to
+  compare `"scrypt"`.
+- **Ops surface under session+RBAC** (`backend/src/modules/ops/index.ts`, mounted at
+  `/admin/ops`): gate `ops.manage` (owner bypasses, migration `033_ops_permission.sql`),
+  actor mapping sets `req.controlActorUserId = req.userId` (audit keeps `control.*`
+  prefix with the real operator), `GET /status` (db/redis ping, memory, online players),
+  and the backup/resource/monitoring/overview control routers reused 1:1. Web admin
+  `adminWeb.ts` gained the **Ops ระบบ** tab.
+- **Admin account**: `allday_admin` / `CgQqswEw-22Fe1OUOew2` (id=45, owner) — created via
+  `backend > npm run admin:create -- allday_admin --random` (`--random` support added in
+  `scripts/createAdmin.ts`).
+- **Electron app** (`app/`): main-process fetch login, Set-Cookie parse →
+  `session.defaultSession.cookies.set`, `sessionWorks` probe, IPC
+  `settings/set-server/login/logout`, webRequest 401-on-`/admin` → login page,
+  contextIsolation+sandbox, navigation restricted to server origin. electron ^33
+  (33.4.11 installed), electron-builder ^26 (needed — v25's 7za failed on winCodeSign
+  symlinks), targets portable + NSIS, appId `th.rp.bedrockcontrol`.
+- **Tests**: `backend > npm test` = **36/36** (2 new blocks: auth login + ops session/RBAC).
+
 ## 2026-09-10 Round 13 — Resource Manager + Backup/Wipe/Restore + Monitoring + Control CLI
 
 Roadmap items #4/#5/#6/#7, completing the control plane (Round 12 gave the
