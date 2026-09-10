@@ -350,6 +350,22 @@ Env: `CTL_BASE_URL` (default `http://127.0.0.1:4000`), `CTL_API_KEY` (required),
 `CTL_ACTOR` (optional user-id for audit attribution). Exit 0 on a business answer
 (including `ok:false`), 1 on network/usage errors. Full usage in the file header.
 
+A standalone EXE of the same CLI is built with `vercel/pkg` (no Node install
+needed on the target box):
+
+```
+# from tools/ — builds Windows + Linux binaries into tools/dist-exe/
+npx pkg .
+```
+
+Emits `tools/dist-exe/bedrock-rp-control-cli-win.exe` and
+`tools/dist-exe/bedrock-rp-control-cli-linux`.
+`tools/control-cli.cjs` is the CommonJS entry pkg bundles; the build config lives
+in `tools/package.json` (`pkg.targets`: `node18-win-x64`, `node18-linux-x64`).
+The EXE reads the same `CTL_*` env vars and exits with the same codes as the
+`.mjs` form. `tools/dist-exe/` is git-ignored — rebuild on the box or ship the
+binaries via an artifact.
+
 ## Inventory
 
 - `POST /admin/inventory/give` `{characterId, itemId, quantity}` — admin-only, audited, stacks onto existing slots up to `max_stack` then fills empty slots, throws `409` if there's no room left

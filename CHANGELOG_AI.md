@@ -50,6 +50,44 @@
 ...
 ---
 
+## [2026-09-10 16:20] — AI: big-pickle (opencode) — Control CLI standalone EXE (pkg build)
+
+### Task
+Package `tools/control-cli.mjs` as a standalone Windows/Linux executable so the ops/EXE box doesn't need Node installed.
+
+### Changed
+- `tools/control-cli.cjs`: new CommonJS build entry — identical logic to `.mjs` (same commands, env, exit codes); only `node:process`/`node:buffer` + global `fetch` used.
+- `tools/package.json`: new pkg build config (`main: control-cli.cjs`, `pkg.targets: node18-win-x64,node18-linux-x64`, `pkg.outputPath: dist-exe`).
+- `README.md`: documented `npx pkg .` build in the Control CLI section + output filenames.
+- `.gitignore`: added `dist-exe/` (binary artifacts not committed).
+
+### Why
+Roadmap item #7 called for an EXE-style control client. The `.mjs` version needs Node; the pkg build produces `bedrock-rp-control-cli-win.exe` (~36 MB) and `bedrock-rp-control-cli-linux` (~44 MB) that run with zero Node install. Node18 runtime is used because vercel/pkg only ships prebuilt binaries up to Node 18; the CLI only uses `fetch` (available since Node 18).
+
+### Dependencies / Impact
+- `npx pkg` (vercel/pkg 5.8.1) at build time only — not a runtime dep of the backend.
+- The EXE is a pure HTTP client: never touches Postgres/Redis directly (EXE rule preserved).
+
+### Tests
+- [PASS] `npx pkg .` (tools/) → emits both targets.
+- [PASS] Windows EXE smoke test against a live backend (PORT 8098): `ping`, `status`, `health`, `resources`, `monitoring`, `backups create`+`list`, `wipe dry-run` all output correct data; missing-key path exits 1 with usage.
+- [PASS] `node tools/control-cli.mjs` parity unchanged (33/33 integration suite ran earlier this session).
+
+### Security
+No change — same API key auth, same audit attribution.
+
+### Known Issues
+- pkg Node18 runtime prints `ExperimentalWarning: The Fetch API is an experimental feature` to stderr on first fetch. Cosmetic; can be suppressed with `--no-warnings=ExperimentalWarning` if desired.
+- `pkg` requires a network fetch of base binaries to `PKG_CACHE_PATH` on first build.
+
+### Next Steps
+Offline: CI artifact/release job to attach the built EXEs to GitHub releases (optional).
+
+### Handoff Notes
+Build from `tools/` (`npx pkg .`). Outputs land in `tools/dist-exe/` (git-ignored). Rebuild whenever the CLI behavior changes; the `.cjs` and `.mjs` must stay in sync (same logic, two module formats).
+
+---
+
 ## [2026-09-10 15:45] — AI: big-pickle (opencode) — Fix: psql restore path missing TRUNCATE (CI #34453865682 red)
 
 ### Task
