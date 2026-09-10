@@ -2792,6 +2792,77 @@ const tReq2 = (await bridgeJson("/bridge/phone/taxi/request", {
     );
   });
 
+  await t.test("control: overview every-domain count snapshot", async () => {
+    const cget = (p: string) => get(p, { "x-control-api-key": CONTROL_KEY });
+    const o = await (await cget("/control/overview")).json();
+    assert.equal(o.ok, true);
+    assert.ok(!Number.isNaN(Date.parse(o.generatedAt)));
+    assert.equal(o.services.database.ok, true);
+    assert.equal(o.services.redis.ok, true);
+    assert.ok(typeof o.playersOnline.count === "number");
+    assert.ok(Array.isArray(o.playersOnline.players));
+
+    // core
+    assert.equal(typeof o.core.users, "number");
+    assert.ok(o.core.users >= 3, "three users created earlier are counted");
+    assert.ok(o.core.characters >= 1);
+    assert.equal(typeof o.core.wallets, "number");
+    assert.equal(typeof o.core.sessions, "number");
+    assert.ok(o.core.items >= 1, "seeded items are counted");
+
+    // economy money sums agree with what earlier rounds created
+    assert.equal(typeof o.economy.cashCents, "number");
+    assert.equal(typeof o.economy.bankCents, "number");
+    assert.equal(typeof o.economy.redMoneyCents, "number");
+    assert.equal(typeof o.economy.transactions, "number");
+    assert.equal(typeof o.economy.openAnomalies, "number");
+
+    // each domain present and numeric
+    assert.equal(typeof o.inventory.carrySlots, "number");
+    assert.equal(typeof o.inventory.containers, "number");
+    for (const k of ["total", "garaged", "deployed", "seized", "forSale"]) {
+      assert.equal(typeof o.vehicles[k], "number");
+    }
+    for (const k of ["total", "owned", "seized", "forSale"]) {
+      assert.equal(typeof o.properties[k], "number");
+    }
+    for (const k of ["licenses", "records", "reports", "reportsOpen", "fines", "finesOutstanding", "warrants", "warrantsActive", "evidence", "arrests", "arrestsActive"]) {
+      assert.equal(typeof o.police[k], "number");
+    }
+    for (const k of ["records", "downed", "dead", "bills", "billsUnpaid"]) {
+      assert.equal(typeof o.ems[k], "number");
+    }
+    for (const k of ["numbers", "contacts", "messages", "calls", "waypoints", "taxiRequests", "taxiPending", "emergencyCalls", "emergencyOpen"]) {
+      assert.equal(typeof o.phone[k], "number");
+    }
+    for (const k of ["total", "open", "messages"]) {
+      assert.equal(typeof o.cases[k], "number");
+    }
+    for (const k of ["total", "pending"]) {
+      assert.equal(typeof o.trades[k], "number");
+    }
+    assert.equal(typeof o.shop.listings, "number");
+    for (const k of ["events", "open", "openHigh", "auditFailures1h"]) {
+      assert.equal(typeof o.security[k], "number");
+    }
+    for (const k of ["auditEntries", "resources", "resourcesEnabled", "backups", "playerSessionsActive"]) {
+      assert.equal(typeof o.ops[k], "number");
+    }
+
+    // earlier control activity is visible in the audit feed
+    assert.ok(Array.isArray(o.recentAdminActions));
+    assert.ok(
+      o.recentAdminActions.some((a: any) => a.action === "control.resource.restart"),
+      "overview audit feed includes the resource restart from earlier rounds"
+    );
+
+    // read-only overview never writes audit rows on its own
+    const before = await pool.query(`SELECT COUNT(*)::int AS n FROM audit_log WHERE action = 'control.call'`);
+    await cget("/control/overview");
+    const after = await pool.query(`SELECT COUNT(*)::int AS n FROM audit_log WHERE action = 'control.call'`);
+    assert.equal(after.rows[0].n, before.rows[0].n, "overview GET must not write audit rows");
+  });
+
   await t.test("control: backup / wipe (dry-run+confirm) / restore", async () => {
     const cget = (p: string) => get(p, { "x-control-api-key": CONTROL_KEY });
     const cpost = (p: string, body?: unknown) =>

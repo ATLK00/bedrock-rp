@@ -3616,3 +3616,42 @@ None remaining for this item — closed.
 
 ### Handoff Notes
 This entry was reformatted from a non-standard, untimestamped note left in this file to match the changelog's own required format. The work was performed manually by the user, not by an AI — the AI contribution was reformatting this entry for changelog compliance. Committed as `744f82b` (Complete persistent id rename).
+
+---
+
+## [2026-09-10 18:00] — AI: big-pickle
+
+### Task
+User wants the admin EXE / control-cli to be a one-person "check everything in the project" console with a PowerShell-style screen. Added a single `/control/overview` snapshot that counts every domain table in the project, a matching `overview` CLI command, and fixed a restore self-deadlock found by the new test round.
+
+### Changed
+- `backend/src/modules/control/overview.ts` — NEW `GET /control/overview`: one round-trip snapshot of every domain, incl. services (db/redis), players online, core (users/characters/sessions/items), economy (cash/bank/red money + tx + open anomalies), inventory, vehicles, properties, police, ems, phone, cases, trades, shop, security (events/open/openHigh/audit failures 1h), ops (audit entries/resources/backups/player sessions) + recent admin-action tail.
+- `backend/src/modules/control/index.ts` — mounted `overviewRouter`; header doc updated.
+- `backend/src/test/integration.test.ts` — NEW block `control: overview every-domain count snapshot` (shape + values + "read-only GET writes no audit row"). Suite now 34 blocks.
+- `tools/control-cli.mjs` + `tools/control-cli.cjs` — NEW `overview` command (sections printer incl. `fmtMoney`); dispatch + usage text updated.
+- `backend/src/modules/control/backupManager.ts` — **deadlock fix**: `rebaseSequences` now accepts a query target (defaults to `pool`). `replayDump` calls it with the in-transaction `client`; the psql path stays on `pool`. Previously `replayDump` ran `rebaseSequences` on `pool.query` while `client` held ACCESS EXCLUSIVE locks from TRUNCATE, and `SELECT MAX(id)` inside rebase waited on those locks that only COMMIT (which comes after rebase) would release → infinite self-deadlock on hosts without `psql` (restore POST hung ~forever, every run).
+
+### Why
+The old `/control/monitoring` covers OS/process/error-rate but not the domain facts; an ops "check everything" screen needs one call that sums the whole server. The deadlock was exposed because the local dev machine has no `psql`, so restores exercised `replayDump` (Linux/CI had `psql` → psql branch → never hit the bug).
+
+### Dependencies / Impact
+- No DB migration (read-only endpoint; the restore fix touches code only).
+- EXE rebuilt: `tools/dist-exe/bedrock-rp-control-cli-win.exe` + `linux` (pkg 5.8.1). Downloaded EXE at `C:\Users\xthic\Downloads\bedrock-rp-control-cli-win.exe` replaced with the new build.
+
+### Tests
+- [PASS] `npm run build` (tsc)
+- [PASS] `npm test` — **34/34** (incl. new `control: overview every-domain count snapshot`; `control: backup/wipe/restore` now 4.1s instead of deadlock — previously hung ~forever until the 10-min cap)
+- [PASS] live smoke: `node tools/control-cli.mjs overview` against the dev backend (port 8080) and the rebuilt win EXE — both print the full sectioned report
+- [NOT RUN] no new dedicated unit tests for `rebaseSequences` — covered by the existing restore round in the integration suite
+
+### Security
+No new security surface: `/control/overview` is behind the existing key + read-gets-are-not-audited rule (same as other control GETs).
+
+### Known Issues
+None new.
+
+### Next Steps
+- Optional follow-up: a web ops-console that renders the same `/control/overview` payload (tabs + console) — currently the CLI command is the "screen".
+
+### Handoff Notes
+The restore deadlock had existed since `rebaseSequences` was added to `replayDump` (commit `9006366`); CI green hides it because runners have `psql`. Anyone testing on a `psql`-less host must keep `rebaseSequences(touchedTables, client)` in the replay path and `rebaseSequences(tables)` in the psql path.

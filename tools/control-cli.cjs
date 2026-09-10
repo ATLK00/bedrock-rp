@@ -188,6 +188,61 @@ async function cmdMonitoring() {
   for (const a of r.recentAdminActions) console.log(`  ${a.createdAt} actor=${f(a.actorUserId)} ${a.action} ${f(a.targetType)}/${f(a.targetId)} [${a.result}]`);
 }
 
+function fmtMoney(cents) {
+  if (cents === null || cents === undefined) return "-";
+  return "$" + (cents / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+async function cmdOverview() {
+  const r = await call("GET", "/control/overview");
+  console.log(`overview ok=${r.ok} generatedAt=${r.generatedAt}`);
+  console.log(`services: db=${r.services.database.ok ? "ok" : "DOWN"} (${fmtDur(r.services.database.latencyMs)}) redis=${r.services.redis.ok ? "ok" : "DOWN"} (${fmtDur(r.services.redis.latencyMs)})`);
+  console.log(`players online: ${r.playersOnline.count}`);
+  for (const p of r.playersOnline.players) console.log(`  - ${p.playerName} (${p.persistentId})`);
+
+  console.log(`\nCORE`);
+  console.log(`  users: ${r.core.users}  characters: ${r.core.characters} (active ${r.core.charactersActive})  sessions: ${r.core.sessions}  items: ${r.core.items}`);
+
+  console.log(`\nECONOMY`);
+  console.log(`  money: cash=${fmtMoney(r.economy.cashCents)}  bank=${fmtMoney(r.economy.bankCents)}  red=${fmtMoney(r.economy.redMoneyCents)}`);
+  console.log(`  transactions: ${r.economy.transactions}  open anomalies: ${r.economy.openAnomalies}`);
+
+  console.log(`\nINVENTORY`);
+  console.log(`  carry slots: ${r.inventory.carrySlots}  containers: ${r.inventory.containers}  container items: ${r.inventory.containerItems}`);
+
+  console.log(`\nVEHICLES`);
+  console.log(`  total: ${r.vehicles.total}  garaged: ${r.vehicles.garaged}  deployed: ${r.vehicles.deployed}  seized: ${r.vehicles.seized}  for-sale: ${r.vehicles.forSale}`);
+
+  console.log(`\nPROPERTIES`);
+  console.log(`  total: ${r.properties.total}  owned: ${r.properties.owned}  seized: ${r.properties.seized}  for-sale: ${r.properties.forSale}`);
+
+  console.log(`\nPOLICE`);
+  console.log(`  licenses: ${r.police.licenses}  records: ${r.police.records}  reports: ${r.police.reports} (open ${r.police.reportsOpen})`);
+  console.log(`  fines: ${r.police.fines} (outstanding ${r.police.finesOutstanding})  warrants: ${r.police.warrants} (active ${r.police.warrantsActive})`);
+  console.log(`  evidence: ${r.police.evidence}  arrests: ${r.police.arrests} (active ${r.police.arrestsActive})`);
+
+  console.log(`\nEMS`);
+  console.log(`  records: ${r.ems.records}  downed: ${r.ems.downed}  dead: ${r.ems.dead}  bills: ${r.ems.bills} (unpaid ${r.ems.billsUnpaid})`);
+
+  console.log(`\nPHONE`);
+  console.log(`  numbers: ${r.phone.numbers}  contacts: ${r.phone.contacts}  messages: ${r.phone.messages}  calls: ${r.phone.calls}  waypoints: ${r.phone.waypoints}`);
+  console.log(`  taxi: ${r.phone.taxiRequests} (pending ${r.phone.taxiPending})  emergency: ${r.phone.emergencyCalls} (open ${r.phone.emergencyOpen})`);
+
+  console.log(`\nCASES`);
+  console.log(`  total: ${r.cases.total}  open: ${r.cases.open}  messages: ${r.cases.messages}`);
+
+  console.log(`\nTRADES / SHOP`);
+  console.log(`  trades: ${r.trades.total} (pending ${r.trades.pending})  shop listings: ${r.shop.listings}`);
+
+  console.log(`\nSECURITY`);
+  console.log(`  events: ${r.security.events}  open: ${r.security.open}  high/critical: ${r.security.openHigh}  audit failures(1h): ${r.security.auditFailures1h}`);
+  console.log(`  recent:`);
+  for (const a of r.recentAdminActions) console.log(`    ${a.createdAt} actor=${f(a.actorUserId)} ${a.action} ${f(a.targetType)}/${f(a.targetId)} [${a.result}]`);
+
+  console.log(`\nOPS`);
+  console.log(`  audit entries: ${r.ops.auditEntries}  resources: ${r.ops.resources} (enabled ${r.ops.resourcesEnabled})  backups: ${r.ops.backups} (last ${f(r.ops.lastBackupAt)})`);
+}
+
 async function cmdResources(flags, positional) {
   const sub = positional[0];
   if (!sub || sub === "list") {
@@ -353,6 +408,7 @@ async function cmdWipe(flags, positional) {
     audit: () => cmdAudit(flags),
     security: () => cmdSecurity(flags),
     monitoring: cmdMonitoring,
+    overview: cmdOverview,
     resources: () => cmdResources(flags, positional),
     backups: () => cmdBackups(flags, positional),
     wipe: () => cmdWipe(flags, positional),
@@ -361,7 +417,7 @@ async function cmdWipe(flags, positional) {
   if (!handlers[cmd]) {
     console.error(
       `usage: control-cli <command>\n` +
-        `commands: ping | status | health | players | audit | security | monitoring | resources | backups | wipe\n` +
+        `commands: ping | status | health | players | audit | security | monitoring | overview | resources | backups | wipe\n` +
         `env: CTL_BASE_URL (default http://127.0.0.1:4000), CTL_API_KEY (required), CTL_ACTOR (optional)`
     );
     process.exit(1);

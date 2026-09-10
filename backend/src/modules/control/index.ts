@@ -13,6 +13,7 @@
 //   resources      /resources*             (registered resources + verbs)
 //   backup         /backups*  /wipe/*      (backup/verify/restore + wipe)
 //   monitoring     /monitoring             (dashboard snapshot)
+//   overview       /overview               (every-domain count snapshot)
 //
 // Auth: single CONTROL_API_KEY (config, min 16 chars), compared constant-time.
 // Wrong/missing key -> HIGH security event + 401. Attribution: optional
@@ -41,6 +42,7 @@ import { appVersion, ctl, parseLimitOffset, qstr, requestIdOf } from "./common.j
 import { resourceRouter } from "./resourceManager.js";
 import { backupRouter } from "./backupManager.js";
 import { monitoringRouter } from "./monitoring.js";
+import { overviewRouter } from "./overview.js";
 
 export const controlRouter = Router();
 
@@ -328,3 +330,4 @@ controlRouter.get(
 controlRouter.use(resourceRouter);
 controlRouter.use(backupRouter);
 controlRouter.use(monitoringRouter);
+controlRouter.use(overviewRouter);

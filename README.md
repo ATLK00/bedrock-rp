@@ -311,6 +311,10 @@ control clients never connect to PostgreSQL/Redis directly.
   - `GET /control/monitoring` — one-call dashboard: system load/mem/disk,
     db+redis latency, online players, 1h error rate, open security events +
     economy anomalies
+  - `GET /control/overview` — **check-everything snapshot**: one call counts
+    every domain table in the project (core, economy cash/bank/red, inventory,
+    vehicles, properties, police, ems, phone, cases, trades, shop, security,
+    ops/resources/backups) + players online + recent admin-action tail
   - **Resources** (`/control/resources`, kind `http|docker|process`, per-kind probe):
     `GET` list (with live per-resource status), `GET /resources/:name`,
     `POST /resources` `{name, kind, target, version?, dependencies?[], commands?{verb→cmd},
@@ -343,7 +347,7 @@ CTL_BASE_URL=http://127.0.0.1:8080 CTL_API_KEY=... node tools/control-cli.mjs <v
 ```
 
 Subcommands: `ping`, `status`, `health`, `players`, `audit`, `security`,
-`monitoring`, `resources` (`list`/`show`/`register`/`update`/`unregister`/
+`monitoring`, `overview`, `resources` (`list`/`show`/`register`/`update`/`unregister`/
 `enable`/`disable`/`version`/`install`/`update`/`restart`/`status`), `backups`
 (`list`/`create`/`show`/`verify`/`restore`), `wipe` (`dry-run`/`confirm`).
 Env: `CTL_BASE_URL` (default `http://127.0.0.1:4000`), `CTL_API_KEY` (required),

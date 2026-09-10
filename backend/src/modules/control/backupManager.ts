@@ -415,9 +415,12 @@ async function applyDump(content: string, backupId: number, actorUserId: number 
 
 /** Re-sync serial sequences to the maximum restored `id` per table. Only
  * tables that actually have an `id` column are considered (calling
- * pg_get_serial_sequence on an id-less table raises and would abort). */
-async function rebaseSequences(tables: string[]) {
-  const seqRes = await pool.query(
+ * pg_get_serial_sequence on an id-less table raises and would abort). Runs on
+ * `client` when called from inside the replay transaction, or `pool` when the
+ * psql restore already committed — using the same connection is what keeps
+ * the TRUNCATE->INSERT->rebase sequence from self-deadlocking. */
+async function rebaseSequences(tables: string[], q: { query: (sql: string, params?: unknown[]) => Promise<any> } = pool) {
+  const seqRes = await q.query(
     `SELECT c.relname AS t,
             pg_get_serial_sequence(c.oid::regclass::text, 'id') AS seq
      FROM pg_class c
@@ -432,7 +435,7 @@ async function rebaseSequences(tables: string[]) {
   for (const t of tables) {
     const seq = seqByTable.get(t);
     if (seq) {
-      await pool.query(`SELECT setval($1, GREATEST(COALESCE((SELECT MAX(id) FROM ${quoteIdent(t)}), 0), 1))`, [seq]);
+      await q.query(`SELECT setval($1, GREATEST(COALESCE((SELECT MAX(id) FROM ${quoteIdent(t)}), 0), 1))`, [seq]);
     }
   }
 }
@@ -511,7 +514,7 @@ if (cols.length === 0) continue;
     }
     // Restored rows carry explicit ids; bring every serial sequence forward so
     // the next plain insert can't collide with restored ids.
-    await rebaseSequences(touchedTables);
+    await rebaseSequences(touchedTables, client);
     await client.query("COMMIT");
   } catch (err) {
     await client.query("ROLLBACK").catch(() => {});

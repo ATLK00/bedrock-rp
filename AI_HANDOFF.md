@@ -43,6 +43,12 @@ read-only `/control` surface; this round adds the operational half).
 - **Monitoring** (`GET /control/monitoring`): system load/mem/disk + db/redis
   latency + online players + 1h error rate + open security events & economy
   anomalies in one call. File: `backend/src/modules/control/monitoring.ts`.
+- **Overview** (`GET /control/overview`): the "check everything" one-call
+  snapshot — counts every domain table in the project (core, economy
+  cash/bank/red, inventory, vehicles, properties, police, ems, phone, cases,
+  trades, shop, security, ops/resources/backups) + players online + recent
+  admin-action tail. Read-only, GETs logged but nothing audited. File:
+  `backend/src/modules/control/overview.ts`. CLI subcommand: `overview`.
 - **Config additions**: `BACKUP_DIR` (default `../ops/backups`, resolved from
   backend cwd — tests point it at a fresh temp dir), `WIPE_PASSPHRASE`. Both
   documented in `backend/.env.example` + `ops/.env.prod.example`; prod
@@ -66,8 +72,14 @@ read-only `/control` surface; this round adds the operational half).
   `TRUNCATE X: …` context.
 - **Tests**: suite blocks 31 (resources CRUD/probe/verbs/audit), 32
   (backup create + verify + restore), 33 (wipe dry-run + schema wipe
-  re-migrates + confirm gating + CRITICAL event). **33/33 green**; CLI smoke
-  against a live backend green. `npm run build` clean.
+  re-migrates + confirm gating + CRITICAL event), 34 (overview every-domain
+  count snapshot). **34/34 green**; CLI smoke against a live backend green.
+  `npm run build` clean.
+- **Restore self-deadlock fix** (added with the overview round): `rebaseSequences`
+  takes a query target — `replayDump` calls it with the in-transaction `client`,
+  the psql path stays on `pool`. Running it on `pool` while `client` still held
+  TRUNCATE ACCESS EXCLUSIVE locks deadlocked forever on `psql`-less hosts (Linux
+  CI had `psql` so the bug never surfaced there). Keep this split intact.
 
 ## 2026-09-10 Round 12 — Admin Control API (`/control`)
 
