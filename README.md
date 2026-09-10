@@ -86,13 +86,18 @@ audit-logged. Built per `docs/MASTER_PROMPT.md`.
 - **Admin surface**: audit-log viewer (`GET /admin/audit`, incl. `before/after/reason`),
   multi-currency economy reads (`GET /admin/economy/character/:id`), container CRUD,
   character update/view (locked-field approval path).
+- **Control API**: `/control` — external machine API (key-auth `x-control-api-key`,
+  constant-time) for the future admin EXE / AI-automation: `ping`, `status`,
+  `players`, `audit`, `security/events`, `health`. Optional
+  `x-control-actor-user-id` header attributes calls to a staff user in the audit
+  log. See "Control API" below.
 
 Integration suite (`backend/src/test/integration.test.ts`) runs against a throwaway
-`bedrock_rp_test` DB (29 tests: auth, character create/link/delete/details-lock-case,
+`bedrock_rp_test` DB (30 tests: auth, character create/link/delete/details-lock-case,
 bridge secret/signature/replay, presence + stale-heartbeat, RBAC, economy
 cash/bank/red-money/anomaly/idempotency, inventory weight + containers, cases,
 security events, vehicles full lifecycle, properties full lifecycle, police
-lifecycle, ems lifecycle, phone lifecycle).
+lifecycle, ems lifecycle, phone lifecycle, control API key-auth/status/audit).
 Spec: `npm run migrate`, `npm run build`, `npm test` (needs `ops` docker stack up).
 
 **Not locked yet** — do not assume:
@@ -260,6 +265,10 @@ Tabs:
   fines), per-citizen actions (license issue/suspend/revoke, fine issue+pay,
   warrant issue/revoke, arrest/release, record update), and
   fines/warrants/reports/arrests lists
+- **หมอ** — EMS: medical record list (state / downed countdown / unpaid bills),
+  bill waive, state reset
+- **โทรศัพท์** — phone: assigned numbers, taxi ride log, emergency-call board
+  (open/closed)
 
 It's mounted *before* the rate-limited admin router in `app.ts`
 (`/admin` assets bypass the 60/min limiter; the data calls underneath still
@@ -271,6 +280,34 @@ Two read-only list endpoints were added for it:
 The same canonical-origin auto-redirect as the player panel applies
 (OAuth state cookies only survive on the host registered as
 `DISCORD_REDIRECT_URI`).
+
+## Control API
+
+`/control` is the single external machine-to-machine surface for the future
+admin EXE / admin web / AI-automation (roadmap: EXE/Web/AI → Control API →
+backend → DB/Redis/BDS). Nothing but the backend ever touches the database —
+control clients never connect to PostgreSQL/Redis directly.
+
+- **Auth**: `CONTROL_API_KEY` (required config, min 16 chars) sent as the
+  `x-control-api-key` header; compared constant-time. Wrong/missing key → `401`
+  plus a HIGH `control_invalid_key` security event. Independent credential from
+  the bridge secret (pack) and `JWT_SECRET` (browser).
+- **Attribution**: optional `x-control-actor-user-id` header names the staff
+  user behind a call (validated, audit-only — it never authorizes). Calls with
+  an actor write a `control.call` audit row; bare read GETs are not audited per
+  request so status polling doesn't flood the log.
+- **Endpoints**:
+  - `GET /control/ping` — app identity, version, server time (config check)
+  - `GET /control/status` — process (uptime/pid/node/memory) + DB/Redis health
+    with latency + online players (presence)
+  - `GET /control/players` — characters with live `isOnline` overlay
+    (`?query=`, `?limit=`, `?offset=`)
+  - `GET /control/audit` — recent admin-action tail (`?action=`, `?actorUserId=`)
+  - `GET /control/security/events` — Security Center tail
+    (`?severity=`, `?acknowledged=`)
+  - `GET /control/health` — key-authenticated readiness probe
+- Rate-limited (`controlLimiter`, default 120/min/IP) and every unexpected
+  handler failure raises a MEDIUM `control_handler_error` event.
 
 ## Inventory
 

@@ -21,6 +21,7 @@ const ADMIN_DB_URL =
   process.env.CI_ADMIN_DB_URL || "postgres://bedrock_rp:changeme@localhost:5434/bedrock_rp";
 const CI_REDIS_URL = process.env.CI_REDIS_URL || "redis://localhost:6379";
 const BDS_SECRET = "test-bridge-secret-0123456789abcdef";
+const CONTROL_KEY = "test-control-api-key-0123456789abcdef";
 
 /** Resolve + connect-probe a service endpoint with backoff, so the suite
  * never races away against a CI services block whose DNS/listeners are still
@@ -85,6 +86,7 @@ async function prepareTestDatabase() {
   process.env.DATABASE_URL = TEST_DB_URL;
   process.env.REDIS_URL = CI_REDIS_URL;
   process.env.BDS_BRIDGE_SECRET = BDS_SECRET;
+  process.env.CONTROL_API_KEY = CONTROL_KEY;
   process.env.JWT_SECRET = "test-jwt-secret-0123456789abcdefghijklmnopqrstuv";
   // The suite legitimately fires far more than the default per-window
   // limits (esp. /admin) while covering all surfaces; raise the tiers so
@@ -94,6 +96,7 @@ async function prepareTestDatabase() {
   process.env.RATE_LIMIT_AUTH_MAX = "100000";
   process.env.RATE_LIMIT_BRIDGE_MAX = "100000";
   process.env.RATE_LIMIT_ADMIN_MAX = "100000";
+  process.env.RATE_LIMIT_CONTROL_MAX = "100000";
 
   // All backend modules must be imported AFTER the env vars above are set —
   // pool/redis/config snapshot env at import time.
@@ -2581,6 +2584,84 @@ const tReq2 = (await bridgeJson("/bridge/phone/taxi/request", {
     ]) {
       assert.ok((byAction[action] ?? 0) >= 1, `expected audit rows for ${action}`);
     }
+  });
+
+  // 30. /control admin control API
+  await t.test("control: api-key gate / status / players / audit / security / actor attribution", async () => {
+    const controlGet = async (path: string, headers: Record<string, string> = {}) =>
+      get(path, { "x-control-api-key": CONTROL_KEY, ...headers });
+
+    // wrong / missing key -> 401 + a HIGH security event lands in the feed
+    assert.equal((await get("/control/status", { "x-control-api-key": "wrong-key-1234567890" })).status, 401);
+    assert.equal((await get("/control/status")).status, 401);
+    const { rows: keyEvents } = await pool.query(
+      `SELECT COUNT(*)::int AS n FROM security_events WHERE event_type = 'control_invalid_key'`
+    );
+    assert.ok(keyEvents[0].n >= 1, "wrong key must raise control_invalid_key");
+
+    // actor header validation
+    assert.equal((await controlGet("/control/status", { "x-control-actor-user-id": "abc" })).status, 400);
+    assert.equal((await controlGet("/control/status", { "x-control-actor-user-id": "999999" })).status, 400);
+
+    // ping: identity + server clock
+    const ping = await (await controlGet("/control/ping")).json();
+    assert.equal(ping.ok, true);
+    assert.equal(ping.app, "bedrock-rp-backend");
+    assert.equal(typeof ping.version, "string");
+    assert.ok(!Number.isNaN(Date.parse(ping.serverTime)));
+
+    // status: dependencies healthy + process + presence
+    const status = await (await controlGet("/control/status")).json();
+    assert.equal(status.ok, true);
+    assert.equal(status.dependencies.database.ok, true);
+    assert.equal(status.dependencies.redis.ok, true);
+    assert.equal(typeof status.dependencies.database.latencyMs, "number");
+    assert.ok(status.process.pid > 0);
+    assert.ok(typeof status.process.uptimeSeconds === "number");
+    assert.ok(Array.isArray(status.onlinePlayers));
+    assert.equal(status.onlinePlayerCount, status.onlinePlayers.length);
+
+    // health: readiness probe behind the key
+    const health = await (await controlGet("/control/health")).json();
+    assert.equal(health.ok, true);
+    assert.equal(health.checks.database, "ok");
+    assert.equal(health.checks.redis, "ok");
+
+    // players: reflects migrated characters with presence overlay fields
+    const players = await (await controlGet("/control/players")).json();
+    assert.equal(players.ok, true);
+    assert.ok(Array.isArray(players.players));
+    assert.ok(players.players.length >= 1);
+    const first = players.players[0];
+    assert.equal(typeof first.name, "string");
+    assert.equal(typeof first.isOnline, "boolean");
+    assert.equal(typeof first.discordTag, "string");
+
+    // audit tail: earlier phone mutations are visible through the control API
+    const auditTail = await (await controlGet("/control/audit?action=phone.contact.add")).json();
+    assert.equal(auditTail.ok, true);
+    assert.ok(auditTail.audit.length >= 1);
+    assert.equal(auditTail.audit[0].result, "success");
+    assert.equal(typeof auditTail.audit[0].createdAt, "string");
+
+    // security events: the failed-key probe earlier is in the feed
+    const sec = await (await controlGet("/control/security/events")).json();
+    assert.equal(sec.ok, true);
+    assert.ok(sec.events.some((e: any) => e.event_type === "control_invalid_key"));
+
+    // read-only GETs are NOT audited per request (no spam when polling status)
+    const before = await pool.query(`SELECT COUNT(*)::int AS n FROM audit_log WHERE action = 'control.call'`);
+    await controlGet("/control/status");
+    const after = await pool.query(`SELECT COUNT(*)::int AS n FROM audit_log WHERE action = 'control.call'`);
+    assert.equal(after.rows[0].n, before.rows[0].n, "stateless control GETs must not write audit rows");
+
+    // an actor-attributed call IS audited to the person
+    await controlGet("/control/status", { "x-control-actor-user-id": String(ctx.userA.id) });
+    const attributed = await pool.query(
+      `SELECT COUNT(*)::int AS n FROM audit_log WHERE action = 'control.call' AND actor_user_id = $1`,
+      [ctx.userA.id]
+    );
+    assert.ok(attributed.rows[0].n >= 1);
   });
 
   // cleanup

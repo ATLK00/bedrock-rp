@@ -75,3 +75,17 @@ export const adminLimiter = rateLimit({
   message: { error: "too many requests, slow down" },
   handler: tripHandler("LOW", "admin", "too many requests, slow down"),
 });
+
+// controlLimiter: external /control admin API calls (API-key authenticated).
+// Generous like the bridge tier — automation polls status legitimately — but
+// still bounded so a stolen key can't brute-force or hammer unboundedly.
+// MEDIUM: the API key screens out anonymous abuse; the residual risk is a
+// compromised key being used at scale, which we want visibly flagged.
+export const controlLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  limit: config.RATE_LIMIT_CONTROL_MAX,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "too many control requests, slow down" },
+  handler: tripHandler("MEDIUM", "control", "too many control requests, slow down"),
+});

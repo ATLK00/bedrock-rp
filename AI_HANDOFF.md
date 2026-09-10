@@ -7,6 +7,36 @@
   real infrastructure; a small set of infrastructure-dependent paths remains
   explicitly unverified (listed below under **Unverified**).
 
+## 2026-09-10 Round 12 — Admin Control API (`/control`)
+
+Roadmap item #3 (post-EMS/Phone). One external machine-to-machine surface
+(`/control`) for the future admin EXE / admin web / AI-automation so nothing but
+the backend ever talks to PostgreSQL/Redis/BDS.
+
+- **Auth**: `CONTROL_API_KEY` (config, min 16 chars, REQUIRED), sent as
+  `x-control-api-key` header, compared constant-time (`timingSafeEqual`). Wrong/
+  missing key → 401 + HIGH `control_invalid_key` security event. Separate from
+  `BDS_BRIDGE_SECRET` and `JWT_SECRET`.
+- **Notable behavior**: read-only GETs are NOT audited per request (status polling
+  wouldn't spam audit_log). Optional `x-control-actor-user-id` header (validated user,
+  attribution only, never authorization) makes a call write an audit row
+  `control.call`, so "who ran this via the EXE" is answerable.
+- **Route file**: `backend/src/modules/control/index.ts`. Mounted in `app.ts` with
+  the new `controlLimiter` (rateLimit.ts, MEDIUM tier event, default 120/min).
+- **Endpoints**: `GET /control/ping` (identity/version/server time),
+  `GET /control/status` (process uptime/pid/node/memory + db/redis ok+latency +
+  online players via presence), `GET /control/players` (characters + live
+  `isOnline` overlay), `GET /control/audit` (tail, `?action=`/`?actorUserId=`),
+  `GET /control/security/events` (tail, `?severity=`/`?acknowledged=`),
+  `GET /control/health` (readiness probe).
+- **Config additions**: `CONTROL_API_KEY`, `RATE_LIMIT_CONTROL_MAX` (+ `.env.example`).
+  BREAKING for deployments: backend now fails boot without `CONTROL_API_KEY`.
+- **No migration** in this round (no schema change). Per-key RBAC scoping is future
+  work (single key = full control).
+- **Tests**: new suite block 30, **30/30** green.
+- **Design rule preserved** (Do Not Change): EXE/web/AI → Control API → backend →
+  DB/Redis/BDS. No direct DB access from any control client.
+
 ## 2026-09-10 Round 11 — EMS / emergency services + Phone app stack
 
 ### EMS (`backend/src/modules/ems/` + migration `028_ems.sql`)
@@ -614,7 +644,9 @@ garage-integrated storage/access, `!house` UI, 26-test suite), and the
 arrest-jail, `!police`/`!mdt` UI, 27-test suite), the **EMS/emergency system**
 (Round 11 — health state machine + hospital money sink + medic UI, `!ems`/
 `!medic`, 28-test suite) and the **phone app stack** (Round 11 — contacts/SMS/
-calls/bank/GPS/taxi-job-board/911, `!phone`, 29-test suite) are all done.
+calls/bank/GPS/taxi-job-board/911, `!phone`, 29-test suite) and the **admin
+control API** (Round 12 — `/control` key-auth surface for the future EXE/web/AI
+client: ping/status/players/audit/security tail, 30-test suite) are all done.
 Remaining verified-gaps: **live *police* verification** — grant a player the
 `police` role, copy `behavior_pack/scripts/police_ui.js` + the updated
 `main.js` to the BDS side, restart, then exercise the MDT in-world (lookup/
@@ -632,6 +664,12 @@ observed; the "heartbeat-after-leave drops presence" drop is HTTP-suite
 covered and can be observed live with a documented curl check; the compass
 `itemUse` trigger caveat and the vanilla-36-slot-size confirmation both still
 need a real client. CI runs on push to `ATLK00/bedrock-rp` master.
+Next roadmap (in order): **Resource Manager** (#4 — install/update/enable/
+disable/restart/status/dependency/version on `/control/resources/*`),
+**Wipe/Backup/Restore** (#5 — Backup → Dry Run → Confirm → Wipe → Integrity Check
++ rollback, critical before launch), **Monitoring** (#6 — reuse `/control/status`
+primitives: CPU/RAM/disk/error rate/security/economy anomalies/recent admin
+actions), then the **EXE** (#7 — thin control client, no business logic).
 
 ## Do Not Change
 - One Discord account = one character

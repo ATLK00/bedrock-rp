@@ -50,6 +50,92 @@
 ...
 
 ---
+## [2026-09-10 12:35] — AI: big-pickle (opencode) — Admin Control API (`/control`)
+
+### Task
+Roadmap item #3 ("ทำต่อทันทีหลัง Live Test" — started immediately, it's backend-only
+and does not collide with the pending live BDS pass). Build the single external
+control surface so the future admin EXE / admin-web / AI-automation never touch
+PostgreSQL/Redis/BDS directly — everything goes through the Control API into the
+backend services.
+
+### Changed
+- `backend/src/config/index.ts`: new required keys `CONTROL_API_KEY` (min 16 chars,
+  the external control-client credential, independent of bridge secret + JWT) and
+  `RATE_LIMIT_CONTROL_MAX` (default 120/min).
+- `backend/.env.example`: documented `CONTROL_API_KEY` (with a gen command) +
+  `RATE_LIMIT_CONTROL_MAX`.
+- `backend/src/middleware/rateLimit.ts`: new `controlLimiter` tier (MEDIUM security
+  event on trip) mounted on `/control` in `backend/src/app.ts`.
+- `backend/src/modules/control/index.ts` (NEW): `/control` router with:
+  - API-key auth middleware — constant-time compare (`crypto.timingSafeEqual`),
+    wrong/missing key → `401` + HIGH `control_invalid_key` security event.
+  - Optional `x-control-actor-user-id` header for attribution — validated to be a
+    real user id, written to the audit log (`action=control.call`) so staff actions
+    through the API are traceable to a person; read-only GETs without the header are
+    NOT audited per request (no audit spam when status polling).
+  - Endpoints: `GET /control/ping` (identity+version+server time),
+    `GET /control/status` (process uptime/pid/node/memory + db/redis health w/
+    latency + online players from presence), `GET /control/players` (characters
+    with live `isOnline` overlay), `GET /control/audit` (recent admin-action tail,
+    filter by action/actorUserId), `GET /control/security/events` (Security Center
+    tail, filter severity/acknowledged), `GET /control/health` (readiness probe).
+  - Error wrapper emits `control_handler_error` (MEDIUM) on unexpected failures.
+- `backend/src/app.ts`: `app.use("/control", controlLimiter, controlRouter)`.
+
+### Why
+Roadmap (#3): one API to rule Web Admin / EXE / AI-Automation, backend owns DB/Redis;
+EXE must never connect to the DB directly. Read-only v1 provides the plumbing +
+observability layer; Resource Manager (#4) / Backup-Wipe (#5) / Monitoring (#6) build
+on this same key-auth router.
+
+### Dependencies / Impact
+- **BREAKING (config)**: `CONTROL_API_KEY` is now REQUIRED — backend fails at boot
+  without it (add to `.env` / docker env).
+- No DB migration in this round (no schema change; permission scoping of API keys is
+  future work).
+
+### Tests
+- `backend/src/test/integration.test.ts`: new block 30 "control: ..." — wrong/missing
+  key → 401 + `control_invalid_key` in the security feed; actor header validation
+  (non-numeric / unknown user → 400); ping identity; status (db+redis ok w/ latency,
+  process info, `onlinePlayerCount === onlinePlayers.length`); health probe; players
+  shape; audit tail picks up earlier `phone.*` rows via `?action=`; security events
+  feed contains the failed-key probe; bare GETs write NO audit rows; actor-attributed
+  GET DOES write `control.call` audit.
+- [PASS] `npm run build` — clean.
+- [PASS] `npm test` — **30/30** pass, 0 fail (was 29).
+- [NOT RUN] live control-client (EXE/web/AI) — none exist yet; verified against the
+  integration-suite HTTP surface only.
+
+### Security
+- Separate credential (`CONTROL_API_KEY`) from `BDS_BRIDGE_SECRET` (pack) and
+  `JWT_SECRET` (browser). Constant-time comparison. HIGH security event on every
+  invalid key attempt; MEDIUM event on control handler failures; rate-limited
+  (keyed by IP, default 120/min).
+- `x-control-actor-user-id` is attribution-only — it never grants authorization
+  (the API key already does); it only lets audit answers the question "who ran this".
+
+### Known Issues
+- Single API key = full control access; per-key role/scope/RBAC is not implemented
+  yet (future round, likely with Resource Manager / RBAC on key objects).
+- `onlinePlayerCount`/`isOnline` depend on presence keys from the BDS pack heartbeat
+  — locally (no real BDS) the lists are empty, which is expected.
+
+### Next Steps
+- Resource Manager (#4): install/update/enable/disable/restart/status/dependency/
+  version verbs on `/control/resources/*`.
+- Wipe/Backup/Restore (#5) with the Backup → Dry Run → Confirm → Wipe → Integrity
+  Check + rollback flow.
+- Monitoring (#6) dashboard (CPU/RAM/disk/error rate/economy anomalies) reusing
+  `/control/status` primitives.
+- EXE (#7) as a thin control client — no business logic; just calls this API.
+
+### Handoff Notes
+- Live BDS EMS/Phone pass (prison/hospital spawns, paper phone item, real-client
+  call/taxi/911) is still pending and does NOT block this round.
+
+---
 ## [2026-09-10 07:24] — AI: big-pickle (opencode) — EMS / emergency services + Phone app stack
 
 ### Task

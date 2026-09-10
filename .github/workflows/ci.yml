@@ -59,7 +59,7 @@ jobs:
         working-directory: backend
         run: npm run build
 
-      - name: Integration suite (build + migrate + 20/20)
+      - name: Integration suite (build + migrate + 30/30)
         working-directory: backend
         env:
           CI_TEST_DB_URL: postgres://bedrock_rp:changeme@localhost:5432/bedrock_rp_test

@@ -5,12 +5,13 @@ import { adminRouter } from "./modules/admin/index.js";
 import { authRouter } from "./modules/auth/routes.js";
 import { sessionMiddleware } from "./modules/auth/index.js";
 import { bridgeRouter } from "./modules/bridge/index.js";
+import { controlRouter } from "./modules/control/index.js";
 import { characterRouter } from "./modules/character/routes.js";
 import { tradeRouter } from "./modules/trade/routes.js";
 import { shopRouter } from "./modules/shop/routes.js";
 import { casesRouter } from "./modules/cases/routes.js";
 import { inventoryRouter } from "./modules/inventory/routes.js";
-import { authLimiter, bridgeLimiter, adminLimiter } from "./middleware/rateLimit.js";
+import { authLimiter, bridgeLimiter, adminLimiter, controlLimiter } from "./middleware/rateLimit.js";
 import { playerWebRouter } from "./web/playerWeb.js";
 import { adminWebRouter } from "./web/adminWeb.js";
 import { requestLogger } from "./middleware/logging.js";
@@ -132,6 +133,10 @@ export function createApp(): express.Express {
   app.use("/cases", adminLimiter, casesRouter);
   app.use("/inventories", adminLimiter, inventoryRouter);
   app.use("/bridge", bridgeLimiter, bridgeRouter);
+
+  // Admin control API (external EXE / web admin / AI-automation). API-key
+  // authenticated inside the router; rate-limited like the bridge tier.
+  app.use("/control", controlLimiter, controlRouter);
 
   // Admin console (static SPA) mounted BEFORE the rate-limited adminRouter so
   // the page/assets bypass the limiter; every data call still hits the

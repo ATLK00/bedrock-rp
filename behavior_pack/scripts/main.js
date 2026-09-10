@@ -14,7 +14,7 @@ import {
 import { tryOpenPropertyUi } from "./property_ui.js";
 import { tryOpenPoliceUi, tryPoliceSpawnEnforcement } from "./police_ui.js";
 import { tryOpenEmsUi, tryEmsSpawnEnforcement } from "./ems_ui.js";
-import { tryOpenPhoneUi } from "./phone_ui.js";
+import { tryOpenPhoneUi, openPhoneUi } from "./phone_ui.js";
 
 /**
  * IDENTITY NOTE: `world.afterEvents.playerJoin`'s `event.playerId` is
@@ -400,6 +400,30 @@ world.afterEvents.itemUse.subscribe((event) => {
   openInventoryUi(event.source, {
     postToBackend,
     getPersistentId: () => persistentIdByName.get(event.source.name),
+    isConfigured: () => !!cachedBridgeConfig,
+  });
+});
+
+/**
+ * Phone opener via ITEM USE (right-click "use" on a paper) — the phone is a
+ * held item, not just a chat command. Paper is the placeholder trigger until a
+ * custom phone item lands. Same caveat as the compass above: vanilla Bedrock
+ * `itemUse` fires for items with a use action; if right-clicking paper proves
+ * dead live, switch the trigger item to a usable one (e.g. carrot_on_a_stick)
+ * or a custom item with a use component — `!phone` remains the fallback.
+ * Small per-player debounce so held right-click can't stack multiple forms.
+ */
+const lastPhoneUseByName = new Map();
+world.afterEvents.itemUse.subscribe((event) => {
+  if (!cachedBridgeConfig) return;
+  if (!event.itemStack || event.itemStack.typeId !== "minecraft:paper") return;
+  const now = Date.now();
+  if (now - (lastPhoneUseByName.get(event.source.name) || 0) < 1000) return;
+  lastPhoneUseByName.set(event.source.name, now);
+  openPhoneUi(event.source, {
+    postToBackend,
+    getPersistentId: () => persistentIdByName.get(event.source.name),
+    getPersistentIdByName: (name) => persistentIdByName.get(name),
     isConfigured: () => !!cachedBridgeConfig,
   });
 });

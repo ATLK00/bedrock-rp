@@ -18,6 +18,11 @@ const EnvSchema = z.object({
   DATABASE_URL: z.string().min(1, "DATABASE_URL is required"),
   REDIS_URL: z.string().min(1, "REDIS_URL is required"),
   BDS_BRIDGE_SECRET: z.string().min(16, "BDS_BRIDGE_SECRET must be at least 16 chars"),
+  // Admin control API key (external EXE / web admin / AI-automation client).
+  // Machine-to-machine: strong random key, sent as x-control-api-key on every
+  // /control request. Independent of the bridge secret (behavior pack) and
+  // JWT_SECRET (browser sessions) — three separate credentials, three surfaces.
+  CONTROL_API_KEY: z.string().min(16, "CONTROL_API_KEY must be at least 16 chars"),
   DISCORD_CLIENT_ID: z.string().optional(),
   DISCORD_CLIENT_SECRET: z.string().optional(),
   DISCORD_REDIRECT_URI: z.string().optional(),
@@ -68,6 +73,7 @@ const EnvSchema = z.object({
   RATE_LIMIT_AUTH_MAX: z.coerce.number().default(10),
   RATE_LIMIT_BRIDGE_MAX: z.coerce.number().default(120),
   RATE_LIMIT_ADMIN_MAX: z.coerce.number().default(60),
+  RATE_LIMIT_CONTROL_MAX: z.coerce.number().default(120),
 });
 
 const parsed = EnvSchema.safeParse(process.env);
