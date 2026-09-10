@@ -134,10 +134,15 @@ async function login(username, password) {
 }
 
 // Is the current session cookie valid for ops access? (probe is read-only)
+// NOTE: bare fetch() in the main process does NOT send cookies, so we read
+// the stored session cookie from Electron's jar and attach it explicitly.
 async function sessionWorks() {
   try {
+    const cookies = await session.defaultSession.cookies.get({ url: serverUrl });
+    const cookieHeader = cookies.map((c) => `${c.name}=${c.value}`).join('; ');
+    if (!cookieHeader) return false;
     const res = await fetch(`${serverUrl}/admin/ops/status`, {
-      headers: { Accept: 'application/json' },
+      headers: { Accept: 'application/json', Cookie: cookieHeader },
     });
     return res.ok;
   } catch {
@@ -173,15 +178,14 @@ function createWindow() {
 
   // If the backend ever answers 401 on an /admin page load (server restart,
   // session revoked, or the in-app logout button), bounce back to login.
-  session.defaultSession.webRequest.onResponseStarted((details, callback) => {
-    try {
-      if (details.statusCode === 401 && details.url.indexOf('/admin') !== -1) {
-        setTimeout(() => {
-          if (win && !win.isDestroyed()) loadLoginPage(win);
-        }, 250);
-      }
-    } catch {}
-    callback();
+  // NOTE: onResponseStarted is an observe-phase event — its listener takes
+  // (details) only, no callback() call at the end (unlike onBeforeRequest).
+  session.defaultSession.webRequest.onResponseStarted((details) => {
+    if (details.statusCode === 401 && details.url.indexOf('/admin') !== -1) {
+      setTimeout(() => {
+        if (win && !win.isDestroyed()) loadLoginPage(win);
+      }, 250);
+    }
   });
 
   win.on('closed', () => { win = null; });

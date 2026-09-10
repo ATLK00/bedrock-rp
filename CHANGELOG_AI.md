@@ -50,6 +50,28 @@
 ...
 ---
 
+## [2026-09-10 20:00] — AI: big-pickle (opencode) — Electron main-process crash fix + session restore
+
+### Task
+- ผู้ใช้เปิด EXE เจอ `Uncaught Exception: TypeError: callback is not a function` ตอน http response แรกผ่าน session
+
+### Changed
+- `app/main.js`: `session.defaultSession.webRequest.onResponseStarted` เดิมรับ `(details, callback)` แล้วเรียก `callback()` — แต่ listener ของ onResponseStarted เป็น observe-phase ใช้ `(details)` เท่านั้น (callback มีเฉพาะ onBeforeRequest); TypeError เกิ ดทุก response ผ่าน session -> `Uncaught Exception` dialog จน process ค้าง. แก้เป็น `(details)` ไม่เรียก callback
+- `app/main.js`: `sessionWorks()` ใช้ bare fetch (main process) ซึ่งไม่ส่ง cookie -> เปิดใหม่ทุกครั้งเด้ง login เสมอ; แก้โดย `session.defaultSession.cookies.get({url})` แล้วส่ง header `Cookie:` ต่อ -> session restore ทำงาน
+
+### Why
+- crash เพราะเรียก callback ที่ไม่มีอยู่; session restore พังเพราะ undici fetch ไม่มี cookie jar
+
+### Dependencies / Impact
+- rebuild dist ทั้ง portable + Setup (ยัง unsigned); ผู้ใช้ต้องปิด instance เก่า (5 process ค้างจาก dialog) ก่อนจะแทนที่ exe ได้
+
+### Tests
+- [PASS] `node --check main.js`
+- [PASS] portable EXE ใหม่: rัน 13-15s, EnumWindows ไม่พบ #32770/JavaScript error dialog, window title = "RP Bedrock - Admin" (เข้าหน้า admin ตรงๆ = session restore ผ่าน)
+- [NOT RUN] NSIS Setup install ไหลลื่น — รันพอ exe เดี่ยว (ผู้ใช้ยังไม่ได้ติดตั้งผ่าน Setup)
+
+---
+
 ## [2026-09-10 19:25] — AI: big-pickle (opencode) — authLimiter: per-username bucket + skip successful logins
 
 ### Task
