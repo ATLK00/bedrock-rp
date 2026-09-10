@@ -65,6 +65,15 @@ const EnvSchema = z.object({
   // never silently dropped.
   SECURITY_EVENT_RETENTION_DAYS: z.coerce.number().default(90),
   IDEMPOTENCY_KEY_RETENTION_DAYS: z.coerce.number().default(7),
+  // Control plane data + wipe safety (roadmap #4/#5):
+  // Where logical database dumps land on disk (resolved relative to the
+  // backend cwd). A mounted volume on the production host, never inside a
+  // throwaway container.
+  BACKUP_DIR: z.string().default("../ops/backups"),
+  // Optional extra guard for the irreversible wipe-confirm endpoint: when
+  // set, the operator must type this passphrase on top of the short-lived
+  // dry-run confirmation token. No value = token alone is enough.
+  WIPE_PASSPHRASE: z.string().optional(),
   // Request throttling tiers (see middleware/rateLimit.ts). Per-window
   // max requests keyed by client IP. Overridable so a high-traffic
   // deployment can tune without a code change, and so the integration

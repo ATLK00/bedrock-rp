@@ -87,17 +87,19 @@ audit-logged. Built per `docs/MASTER_PROMPT.md`.
   multi-currency economy reads (`GET /admin/economy/character/:id`), container CRUD,
   character update/view (locked-field approval path).
 - **Control API**: `/control` — external machine API (key-auth `x-control-api-key`,
-  constant-time) for the future admin EXE / AI-automation: `ping`, `status`,
-  `players`, `audit`, `security/events`, `health`. Optional
-  `x-control-actor-user-id` header attributes calls to a staff user in the audit
-  log. See "Control API" below.
+  constant-time) for the admin EXE / AI-automation: `ping`, `status`, `players`,
+  `audit`, `security/events`, `health`, `monitoring`, `resources/*`, `backups/*`,
+  `wipe/*`. An optional `x-control-actor-user-id` header attributes calls to a
+  staff user in the audit log. A zero-dependency CLI (`tools/control-cli.mjs`)
+  wraps it for scripts/EXE use. See "Control API" below.
 
 Integration suite (`backend/src/test/integration.test.ts`) runs against a throwaway
-`bedrock_rp_test` DB (30 tests: auth, character create/link/delete/details-lock-case,
+`bedrock_rp_test` DB (33 tests: auth, character create/link/delete/details-lock-case,
 bridge secret/signature/replay, presence + stale-heartbeat, RBAC, economy
 cash/bank/red-money/anomaly/idempotency, inventory weight + containers, cases,
 security events, vehicles full lifecycle, properties full lifecycle, police
-lifecycle, ems lifecycle, phone lifecycle, control API key-auth/status/audit).
+lifecycle, ems lifecycle, phone lifecycle, control API key-auth/status/audit,
+control resources, control backup/wipe/restore).
 Spec: `npm run migrate`, `npm run build`, `npm test` (needs `ops` docker stack up).
 
 **Not locked yet** — do not assume:
@@ -306,8 +308,47 @@ control clients never connect to PostgreSQL/Redis directly.
   - `GET /control/security/events` — Security Center tail
     (`?severity=`, `?acknowledged=`)
   - `GET /control/health` — key-authenticated readiness probe
+  - `GET /control/monitoring` — one-call dashboard: system load/mem/disk,
+    db+redis latency, online players, 1h error rate, open security events +
+    economy anomalies
+  - **Resources** (`/control/resources`, kind `http|docker|process`, per-kind probe):
+    `GET` list (with live per-resource status), `GET /resources/:name`,
+    `POST /resources` `{name, kind, target, version?, dependencies?[], commands?{verb→cmd},
+    notes?}`, `PATCH /resources/:name` (update fields / `enabled`), `DELETE`, enable/disable,
+    `GET /resources/:name/version`, and command verbs `POST /resources/:name/{install|update|restart|status}`
+    (any verbs registered in `commands`). Audited `control.resource.*`.
+  - **Backups** (`/control/backups`, dumps land in `BACKUP_DIR`):
+    `GET` list, `POST` create (SQL dump of the schema + COPY data, sha256
+    checksummed), `GET /backups/:id`, `POST /backups/:id/verify` (size + checksum +
+    SQL-syntax replay check), `POST /backups/:id/restore` — **full replace**: each
+    table `TRUNCATE ... RESTART IDENTITY CASCADE`, COPY replayed in FK-dependency
+    order, serial sequences reseeded, status marked `restored`. Audited `control.backup.*`.
+  - **Wipe** (`/control/wipe`): `POST /wipe/dry-run` — previews counts (users,
+    characters, tables) + a short-lived confirmation token (10 min); `POST /wipe/confirm`
+    `{confirmationToken, mode: schema|data, autoBackup?, passphrase?}` — backs up
+    first when `autoBackup`, then wipes (`DROP SCHEMA public CASCADE` + re-migrate for
+    `schema`) or truncates all tables (`data`), and fires a CRITICAL `control_wipe_confirm`
+    event. Optional second factor via config `WIPE_PASSPHRASE`. Audited `control.wipe.*`.
 - Rate-limited (`controlLimiter`, default 120/min/IP) and every unexpected
   handler failure raises a MEDIUM `control_handler_error` event.
+
+### Control CLI
+
+`tools/control-cli.mjs` is the zero-dependency control client (Node ≥ 18, `fetch`
+only — no npm packages, no DB access). It wraps the whole Control API for the
+admin EXE / scripts / AI-automation:
+
+```
+CTL_BASE_URL=http://127.0.0.1:8080 CTL_API_KEY=... node tools/control-cli.mjs <verb> [args] [--flags]
+```
+
+Subcommands: `ping`, `status`, `health`, `players`, `audit`, `security`,
+`monitoring`, `resources` (`list`/`show`/`register`/`update`/`unregister`/
+`enable`/`disable`/`version`/`install`/`update`/`restart`/`status`), `backups`
+(`list`/`create`/`show`/`verify`/`restore`), `wipe` (`dry-run`/`confirm`).
+Env: `CTL_BASE_URL` (default `http://127.0.0.1:4000`), `CTL_API_KEY` (required),
+`CTL_ACTOR` (optional user-id for audit attribution). Exit 0 on a business answer
+(including `ok:false`), 1 on network/usage errors. Full usage in the file header.
 
 ## Inventory
 

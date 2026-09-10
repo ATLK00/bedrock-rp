@@ -7,6 +7,68 @@
   real infrastructure; a small set of infrastructure-dependent paths remains
   explicitly unverified (listed below under **Unverified**).
 
+## 2026-09-10 Round 13 — Resource Manager + Backup/Wipe/Restore + Monitoring + Control CLI
+
+Roadmap items #4/#5/#6/#7, completing the control plane (Round 12 gave the
+read-only `/control` surface; this round adds the operational half).
+
+- **Resources** (`/control/resources`, kind `http|docker|process`):
+  `GET` list (live per-resource probe status), `GET /resources/:name`,
+  `POST /resources` `{name, kind, target, version?, dependencies[]?, commands?,
+  notes?}`, `PATCH /resources/:name`, `DELETE`, `enable|disable`,
+  `GET /resources/:name/version`, and registered command verbs
+  `POST /resources/:name/{install|update|restart|status}` (executes the
+  operator-registered shell command, 60s timeout, output captured; refuses to
+  target the backend's own postgres/redis by name). Probes: `http` fetch ≤5s,
+  `docker inspect`, `tasklist`/`pgrep` — **kind-specific**, never a raw ping.
+  Name must match `[a-z0-9_-]{1,64}`; dependency cycle rejected. Audited
+  `control.resource.*`. File: `backend/src/modules/control/resourceManager.ts`,
+  migration `030_resources.sql` (backend-written only).
+- **Backups** (`/control/backups`, dumps to `BACKUP_DIR`): list / create /
+  show / verify (sha256 + SQL-syntax replay into a rolled-back temp set) /
+  **restore**. Dump = logical SQL (schema + per-table INSERTs) from
+  `backend/src/modules/control/backupManager.ts` — **not** pg_dump output
+  (no psql on the host; replay must be pure SQL). Restore = **full replace**:
+  per-table `TRUNCATE ... RESTART IDENTITY CASCADE`, rows replayed in FK-topo
+  order (Kahn sort over pg_constraint), serials reseeded, status `restored`.
+  Audited `control.backup.*`. Migration `031_backup_records.sql`
+  (`notes` is **TEXT** — the restore path appends
+  `COALESCE(notes,'')||'restored_at='||now()`, a jsonb concat would not match).
+- **Wipe** (`/control/wipe`): `dry-run` → counts + 10-min confirmation token;
+  `confirm` `{confirmationToken, mode: schema|data, autoBackup?, passphrase?}`.
+  schema = `DROP SCHEMA public CASCADE` + re-migrate + ledger row survives via
+  snapshot re-insert; auto-backup before wipe; CRITICAL `control_wipe_confirm`
+  event (re-emitted at phase complete). Optional constant-time `WIPE_PASSPHRASE`
+  second factor. Audited `control.wipe.*`.
+- **Monitoring** (`GET /control/monitoring`): system load/mem/disk + db/redis
+  latency + online players + 1h error rate + open security events & economy
+  anomalies in one call. File: `backend/src/modules/control/monitoring.ts`.
+- **Config additions**: `BACKUP_DIR` (default `../ops/backups`, resolved from
+  backend cwd — tests point it at a fresh temp dir), `WIPE_PASSPHRASE`. Both
+  documented in `backend/.env.example` + `ops/.env.prod.example`; prod
+  `BACKUP_DIR` MUST be a host-mounted volume.
+- **Control CLI** `tools/control-cli.mjs` — zero-dependency (fetch only, no DB):
+  `CTL_BASE_URL` (default http://127.0.0.1:4000), `CTL_API_KEY` (required),
+  `CTL_ACTOR` (audit attribution). Subcommands: ping/status/health/players/
+  audit/security/monitoring/resources(list|show|register|update|unregister|
+  enable|disable|version|install|update|restart|status)/backups(list|create|
+  show|verify|restore)/wipe(dry-run|confirm). Exit 0 on business answer,
+  1 on network/usage. Smoke-tested live against a seeded backend.
+- **Replay bugs found by the restore test** (all fixed in `backupManager.ts`):
+  (1) `parseCopyValue` doubled backslashes (`out += "\\"+next`) — jsonb escaped
+  values via `\"` didn't round-trip; (2) json/jsonb columns now serialized via
+  `JSON.stringify` on dump (canonical JSON, not a JS string); (3)
+  `pg_get_serial_sequence` ABORTS the whole transaction (catch does not help)
+  on tables with no `id` column (`shop_listings`) → replaced with one safe
+  pg_class/pg_attribute query; (4) `setval(seq, 0)` is rejected for sequences
+  that never ran → `GREATEST(MAX(id),1)`; (5) restore status UPDATE uses TEXT
+  concat on `notes`, not jsonb. Replay errors keep `table X row N: …` /
+  `TRUNCATE X: …` context.
+- **Tests**: suite blocks 31 (resources CRUD/probe/verbs/audit), 32
+  (backup create + verify + restore), 33 (wipe dry-run + schema wipe
+  re-migrates + confirm gating + CRITICAL event). **33/33 green**; CLI smoke
+  against a live backend green. `npm run build` clean.
+
 ## 2026-09-10 Round 12 — Admin Control API (`/control`)
 
 Roadmap item #3 (post-EMS/Phone). One external machine-to-machine surface
@@ -646,7 +708,15 @@ arrest-jail, `!police`/`!mdt` UI, 27-test suite), the **EMS/emergency system**
 `!medic`, 28-test suite) and the **phone app stack** (Round 11 — contacts/SMS/
 calls/bank/GPS/taxi-job-board/911, `!phone`, 29-test suite) and the **admin
 control API** (Round 12 — `/control` key-auth surface for the future EXE/web/AI
-client: ping/status/players/audit/security tail, 30-test suite) are all done.
+client: ping/status/players/audit/security tail, 30-test suite), the
+**Resource Manager** (Round 13 — `/control/resources` lifecycle + per-kind probe
++ command verbs), the **Wipe/Backup/Restore** flow (Round 13 —
+`/control/backups` logic dump + verify + full-replace restore in FK-topo order,
+`/control/wipe` dry-run→token→confirm + auto-backup + CRITICAL event,
+`BACKUP_DIR`/`WIPE_PASSPHRASE` config), **Monitoring** (Round 13 —
+`GET /control/monitoring` one-call dashboard) and the **Control CLI** (Round 13
+— `tools/control-cli.mjs`, zero-dependency EXE-style client, 33-test suite)
+are all done.
 Remaining verified-gaps: **live *police* verification** — grant a player the
 `police` role, copy `behavior_pack/scripts/police_ui.js` + the updated
 `main.js` to the BDS side, restart, then exercise the MDT in-world (lookup/
@@ -664,12 +734,11 @@ observed; the "heartbeat-after-leave drops presence" drop is HTTP-suite
 covered and can be observed live with a documented curl check; the compass
 `itemUse` trigger caveat and the vanilla-36-slot-size confirmation both still
 need a real client. CI runs on push to `ATLK00/bedrock-rp` master.
-Next roadmap (in order): **Resource Manager** (#4 — install/update/enable/
-disable/restart/status/dependency/version on `/control/resources/*`),
-**Wipe/Backup/Restore** (#5 — Backup → Dry Run → Confirm → Wipe → Integrity Check
-+ rollback, critical before launch), **Monitoring** (#6 — reuse `/control/status`
-primitives: CPU/RAM/disk/error rate/security/economy anomalies/recent admin
-actions), then the **EXE** (#7 — thin control client, no business logic).
+Next (control-plane done, roadmap post-#7): consider per-key RBAC / scoped keys
+on `/control` (single key today = full control incl. wipe/restore), and the
+**live control pass on the box**: set `CONTROL_API_KEY` + a host-mounted
+`BACKUP_DIR` in prod, create a real backup, restore it once, then run wipe
+dry-run (not confirm) to see live counts.
 
 ## Do Not Change
 - One Discord account = one character

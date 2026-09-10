@@ -8,9 +8,11 @@
 //
 // Rule from the roadmap: EXE / Web Admin / AI never touch PostgreSQL/Redis/BDS
 // directly — everything goes through this API into the backend services.
-// v1 is deliberately read-only + observability (status/players/audit/security
-// tail/ping/health); the mutating verbs (resource install/update/restart,
-// wipe/backup/restore, etc.) land in later rounds on top of this same layer.
+// Surface (roadmap #3 #4 #5 #6):
+//   observability  /ping /status /players /audit /security/events /health
+//   resources      /resources*             (registered resources + verbs)
+//   backup         /backups*  /wipe/*      (backup/verify/restore + wipe)
+//   monitoring     /monitoring             (dashboard snapshot)
 //
 // Auth: single CONTROL_API_KEY (config, min 16 chars), compared constant-time.
 // Wrong/missing key -> HIGH security event + 401. Attribution: optional
@@ -21,31 +23,26 @@
 //
 // Per-request auditing: read-only GETs are NOT individually audited (status
 // polling would flood audit_log). A call IS audited when it carries the
-// actor-attribution header — "who used the control API".
+// actor-attribution header — "who used the control API" — and every mutating
+// verb (resources register/update/restart/..., backup create/restore, wipe)
+// writes its own action row.
 // ---------------------------------------------------------------------------
 
 import { Router } from "express";
 import type { Request, Response } from "express";
 import { timingSafeEqual } from "node:crypto";
-import { readFileSync } from "node:fs";
 import { pool } from "../../db/pool.js";
 import { redis } from "../../cache/redis.js";
 import { config } from "../../config/index.js";
 import { writeAudit } from "../../audit/index.js";
 import { emitSecurityEvent, listSecurityEvents } from "../security/index.js";
 import * as playerSession from "../player_session/index.js";
+import { appVersion, ctl, parseLimitOffset, qstr, requestIdOf } from "./common.js";
+import { resourceRouter } from "./resourceManager.js";
+import { backupRouter } from "./backupManager.js";
+import { monitoringRouter } from "./monitoring.js";
 
 export const controlRouter = Router();
-
-const requestIdOf = (req: Request) => (req as unknown as { requestId?: string }).requestId ?? null;
-
-let appVersion = "0.0.0";
-try {
-  const pkg = JSON.parse(readFileSync(new URL("../../../package.json", import.meta.url), "utf8"));
-  appVersion = typeof pkg?.version === "string" && pkg.version ? pkg.version : "0.0.0";
-} catch {
-  // keep the fallback
-}
 
 /** Constant-time key comparison — never leak timing on a wrong key length/shape. */
 function keyMatches(provided: string | undefined): boolean {
@@ -113,31 +110,6 @@ controlRouter.use(async (req, res, next) => {
 // ---------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------
-
-function ctl(handler: (req: Request) => Promise<Record<string, unknown>> | Record<string, unknown>) {
-  return async (req: Request, res: Response) => {
-    try {
-      res.json(await handler(req));
-    } catch (err: any) {
-      console.error(`[control] ${requestIdOf(req) ?? "?"}:`, err);
-      emitSecurityEvent({
-        eventType: "control_handler_error",
-        severity: "MEDIUM",
-        ip: req.ip ?? null,
-        requestId: requestIdOf(req),
-        payload: { path: req.path },
-      }).catch(() => {});
-      if (res.headersSent) return res.end();
-      res.status(500).json({ ok: false, error: "internal error" });
-    }
-  };
-}
-
-function parseLimitOffset(req: Request, fallback: number) {
-  const limit = Math.max(1, Math.min(Number(req.query.limit) || fallback, 200));
-  const offset = Math.max(0, Number(req.query.offset) || 0);
-  return { limit, offset };
-}
 
 /** Liveness for the control client: proves key, server identity and clock. */
 controlRouter.get(
@@ -348,6 +320,11 @@ controlRouter.get(
   })
 );
 
-function qstr(value: unknown): string | undefined {
-  return typeof value === "string" ? value : undefined;
-}
+// ---------------------------------------------------------------------------
+// Sub-surfaces (roadmap #4 #5 #6) — mounted after the auth middleware above,
+// so every route below is key-authenticated + actor-attributable.
+// ---------------------------------------------------------------------------
+
+controlRouter.use(resourceRouter);
+controlRouter.use(backupRouter);
+controlRouter.use(monitoringRouter);

@@ -9,6 +9,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
+import os from "node:os";
+import path from "node:path";
 import pg from "pg";
 
 // Connection endpoints are host-port overridable so the same suite runs
@@ -97,6 +99,10 @@ async function prepareTestDatabase() {
   process.env.RATE_LIMIT_BRIDGE_MAX = "100000";
   process.env.RATE_LIMIT_ADMIN_MAX = "100000";
   process.env.RATE_LIMIT_CONTROL_MAX = "100000";
+  // Backups/wipe write dump files here — a throwaway temp dir, never the repo.
+  process.env.BACKUP_DIR = path.join(os.tmpdir(), `bedrock-rp-backups-${Date.now()}`);
+  // WIPE_PASSPHRASE left unset in tests: the confirmation-token requirement is
+  // the exercised guard; the passphrase path is config-gated and covered by docs.
 
   // All backend modules must be imported AFTER the env vars above are set —
   // pool/redis/config snapshot env at import time.
@@ -2662,6 +2668,206 @@ const tReq2 = (await bridgeJson("/bridge/phone/taxi/request", {
       [ctx.userA.id]
     );
     assert.ok(attributed.rows[0].n >= 1);
+  });
+
+  await t.test("control: resources registry + probes + verbs", async () => {
+    const cget = (p: string) => get(p, { "x-control-api-key": CONTROL_KEY });
+    const cpost = (p: string, body?: unknown, headers: Record<string, string> = {}) =>
+      post(p, body ?? {}, { "x-control-api-key": CONTROL_KEY, ...headers });
+
+    // empty registry is healthy + shape
+    const list0 = await (await cget("/control/resources")).json();
+    assert.equal(list0.ok, true);
+    assert.ok(Array.isArray(list0.resources));
+
+    // register validation
+    assert.equal((await cpost("/control/resources", { name: "BAD NAME!", kind: "http", target: "x" })).status, 400);
+    assert.equal((await cpost("/control/resources", { name: "badkind", kind: "k8s", target: "x" })).status, 400);
+
+    // register three resources: an HTTP probe, a dependency, and a verb-carrying one
+    const probeUrl = `${baseUrl}/health/ready`;
+    const r1 = await cpost("/control/resources", {
+      name: "test-http",
+      kind: "http",
+      target: probeUrl,
+      version: "1.2.3",
+      dependencies: ["test-dep"],
+    });
+    assert.equal(r1.status, 201);
+    assert.equal((await r1.json()).ok, true);
+    assert.equal((await cpost("/control/resources", {
+      name: "test-http", kind: "http", target: probeUrl,
+    })).status, 409, "duplicate register must 409");
+
+    const r2 = await cpost("/control/resources", { name: "test-dep", kind: "http", target: probeUrl });
+    assert.equal(r2.status, 201);
+
+    // verbs: configured command runs; missing command 409s; disabled resource refuses
+    const r3 = await cpost("/control/resources", {
+      name: "test-verbs",
+      kind: "process",
+      target: "node",
+      commands: { restart: "node -e \"process.exit(0)\"", status: "node -e \"process.exit(0)\"" },
+    });
+    assert.equal(r3.status, 201);
+
+    // probe reflects a healthy http target
+    const httpStatus = await (await cget("/control/resources/test-http")).json();
+    assert.equal(httpStatus.resource.status.ok, true);
+    assert.equal(typeof httpStatus.resource.status.latencyMs, "number");
+
+    // restart via configured command
+    const restart = await (await cpost("/control/resources/test-verbs/restart")).json();
+    assert.equal(restart.ok, true);
+    assert.equal(typeof restart.durationMs, "number");
+
+    // verb with no command configured -> 409 (API never guesses)
+    const noCmd = await cpost("/control/resources/test-http/restart");
+    assert.equal(noCmd.status, 409);
+
+    // disable: probe degrades + verbs refuse
+    let dis = await cpost("/control/resources/test-http/disable");
+    assert.equal((await dis.json()).enabled, false);
+    const afterDisable = await (await cget("/control/resources/test-http")).json();
+    assert.equal(afterDisable.resource.status.ok, false);
+    assert.equal(afterDisable.resource.status.detail, "disabled");
+    const verbOnDisabled = await cpost("/control/resources/test-http/restart", {}, {});
+    assert.equal(verbOnDisabled.status, 409);
+    const en = await cpost("/control/resources/test-http/enable");
+    assert.equal((await en.json()).enabled, true);
+
+    // version + dependency resolution
+    const version = await (await cget("/control/resources/test-http/version")).json();
+    assert.equal(version.version, "1.2.3");
+    assert.equal(typeof version.dependencies["test-dep"], "object");
+    assert.equal(version.dependencies["test-dep"].ok, true);
+
+    // patch updates metadata
+    const patched = await (
+      await fetch(`${baseUrl}/control/resources/test-http`, {
+        method: "PATCH",
+        headers: { "x-control-api-key": CONTROL_KEY, "Content-Type": "application/json" },
+        body: JSON.stringify({ version: "2.0.0" }),
+      })
+    ).json();
+    assert.equal(patched.resource.version, "2.0.0");
+
+    // unregister
+    assert.equal((await cpost("/control/resources", {
+      name: "test-verbs", kind: "process", target: "node",
+    })).status, 409, "duplicate register must 409");
+    const del = await fetch(`${baseUrl}/control/resources/test-verbs`, {
+      method: "DELETE",
+      headers: { "x-control-api-key": CONTROL_KEY },
+    });
+    assert.equal(del.status, 200);
+    assert.equal((await cget("/control/resources/test-verbs")).status, 404);
+
+    // mutating verbs are in the audit trail
+    const auditTail = await (await cget("/control/audit?action=control.resource.restart")).json();
+    assert.ok(auditTail.audit.length >= 1);
+    assert.equal(auditTail.audit[0].result, "success");
+  });
+
+  await t.test("control: monitoring dashboard snapshot", async () => {
+    const cget = (p: string) => get(p, { "x-control-api-key": CONTROL_KEY });
+    const m = await (await cget("/control/monitoring")).json();
+    assert.equal(m.ok, true);
+    assert.ok(!Number.isNaN(Date.parse(m.generatedAt)));
+    assert.ok(m.process.pid > 0);
+    assert.equal(m.services.database.ok, true);
+    assert.equal(m.services.redis.ok, true);
+    assert.ok(typeof m.system.memory.usedPercent === "number");
+    assert.ok(Array.isArray(m.system.cpuLoad));
+    assert.ok(typeof m.playersOnline.count === "number");
+    assert.ok(Array.isArray(m.playersOnline.players));
+    assert.equal(typeof m.errorRate.totalLastHour, "number");
+    assert.equal(m.security.recent.length > 0, true, "earlier security events must be visible");
+    assert.equal(typeof m.economy.openAnomalies, "number");
+    assert.ok(Array.isArray(m.recentAdminActions));
+    // the resource round above left control audit rows in this feed
+    assert.ok(
+      m.recentAdminActions.some((a: any) => a.action === "control.resource.restart"),
+      "recent admin actions must include the resource restart from the prior round"
+    );
+  });
+
+  await t.test("control: backup / wipe (dry-run+confirm) / restore", async () => {
+    const cget = (p: string) => get(p, { "x-control-api-key": CONTROL_KEY });
+    const cpost = (p: string, body?: unknown) =>
+      post(p, body ?? {}, { "x-control-api-key": CONTROL_KEY });
+
+    const baseline = {
+      users: (await pool.query(`SELECT count(*)::int AS n FROM users`)).rows[0].n,
+      characters: (await pool.query(`SELECT count(*)::int AS n FROM characters`)).rows[0].n,
+    };
+    assert.ok(baseline.users >= 1);
+
+    // create + verify a backup
+    const created = await (await cpost("/control/backups")).json();
+    assert.equal(created.ok, true);
+    assert.ok(created.id > 0);
+    assert.ok(created.filename.endsWith(".sql"));
+    assert.ok(created.sizeBytes > 0);
+    assert.match(created.checksumSha256, /^[0-9a-f]{64}$/);
+
+    const verified = await (await cpost(`/control/backups/${created.id}/verify`)).json();
+    assert.equal(verified.ok, true);
+    assert.equal(verified.checksumMatch, true);
+    assert.equal(verified.parseOk, true);
+
+    // dry-run returns a bounded plan + single-use token
+    const dry = await (await cpost("/control/wipe/dry-run")).json();
+    assert.equal(dry.ok, true);
+    assert.equal(dry.plan.users, baseline.users);
+    assert.ok(dry.plan.tables >= 10);
+    assert.equal(typeof dry.confirmationToken, "string");
+    assert.equal(dry.requiresPassphrase, false);
+
+    // confirm without/with a bogus token -> rejected
+    assert.equal((await cpost("/control/wipe/confirm", {})).status, 400);
+    assert.equal((await cpost("/control/wipe/confirm", { confirmationToken: "bogus" })).status, 400);
+
+    // confirm for real (schema mode + auto snapshot)
+    const confirm = await (
+      await cpost("/control/wipe/confirm", { confirmationToken: dry.confirmationToken, mode: "schema" })
+    ).json();
+    assert.equal(confirm.ok, true);
+    assert.equal(confirm.mode, "schema");
+    assert.ok(confirm.autoBackupBackupId > 0);
+    assert.ok(confirm.integrity.migrationsApplied >= 31, "all 31 migrations must be re-applied after a schema wipe");
+    assert.ok(confirm.integrity.publicTables >= 30);
+    assert.ok(confirm.integrity.seededRoles >= 1);
+    assert.ok(confirm.integrity.seededItems > 0);
+
+    // tokens are single-use: the same token is now dead
+    const reuse = await cpost("/control/wipe/confirm", { confirmationToken: dry.confirmationToken });
+    assert.equal(reuse.status, 400);
+
+    // post-wipe: wiped tables collapsed, fresh audit + CRITICAL event recorded
+    const wipedUsers = (await pool.query(`SELECT count(*)::int AS n FROM users`)).rows[0].n;
+    assert.equal(wipedUsers, 0);
+    const wipeAudit = await (await cget("/control/audit?action=control.wipe.confirm")).json();
+    assert.ok(wipeAudit.audit.length >= 1);
+    const wipeEvent = await pool.query(
+      `SELECT count(*)::int AS n FROM security_events WHERE event_type = 'control_wipe_confirm'`
+    );
+    assert.ok(wipeEvent.rows[0].n >= 1, "wipe-complete CRITICAL security event must persist after a schema wipe");
+
+    // restore the auto snapshot -> the pre-wipe data comes back
+    const restored = await (await cpost(`/control/backups/${confirm.autoBackupBackupId}/restore`)).json();
+    assert.equal(restored.ok, true);
+    assert.equal(typeof restored.restoredAt, "string");
+    const postRestore = {
+      users: (await pool.query(`SELECT count(*)::int AS n FROM users`)).rows[0].n,
+      characters: (await pool.query(`SELECT count(*)::int AS n FROM characters`)).rows[0].n,
+    };
+    assert.equal(postRestore.users, baseline.users, "restore must bring users back exactly");
+    assert.ok(postRestore.characters >= baseline.characters);
+    // restored resources (registered earlier this suite) are back in the registry
+    const resources = await (await cget("/control/resources")).json();
+    assert.ok(resources.resources.some((r: any) => r.name === "test-http"));
+    assert.equal(resources.resources.some((r: any) => r.name === "test-verbs"), false, "deleted resource stays deleted");
   });
 
   // cleanup

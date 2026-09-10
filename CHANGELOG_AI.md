@@ -50,6 +50,143 @@
 ...
 
 ---
+## [2026-09-10 15:10] — AI: big-pickle (opencode) — Resource Manager + Backup/Wipe/Restore + Monitoring + Control CLI (33/33)
+
+### Task
+Roadmap items #4 (Resource Manager), #5 (Wipe/Backup/Restore), #6 (Monitoring)
+and #7 (thin EXE-style control client) on top of the Round-12 `/control` key-auth
+surface. The control plane is now complete: read-only observability (#12) →
+per-resource lifecycle → backup/wipe/restore → a single dashboard → one
+zero-dependency CLI wrapping the whole API.
+
+### Changed
+- `backend/migrations/030_resources.sql` (NEW) — `resources` table (name unique,
+  kind `http|docker|process`, target, enabled, version, dependencies text[],
+  commands JSONB verb→shell-command, notes). Written by the backend only.
+- `backend/migrations/031_backup_records.sql` (NEW) — `backup_records`
+  (filename, size_bytes, sha256, table_count, status `pending|verified|restored`,
+  notes **TEXT**, timestamps). The serializer writes this ledger row for every
+  dump; `notes` is deliberately TEXT (not jsonb) — dumb text append is all the
+  restore path needs.
+- `backend/src/modules/control/resourceManager.ts` (NEW) — CRUD on `/control/
+  resources/*` with sanitizers (`name` `[a-z0-9_-]{1,64}`, kind enum, target
+  http/docker/process forms, dependencies + command verbs validated); per-kind
+  probe (`http` fetch ≤5s, `docker inspect`, `tasklist`/`pgrep`); enable/disable;
+  `version` getter; command verbs `install|update|restart|status` execute the
+  caller-registered shell command (never kills the postgres/redis/backend) with a
+  60s timeout, output captured. Every mutation audited (`control.resource.*`).
+- `backend/src/modules/control/backupManager.ts` (NEW) — logical dump of the
+  whole schema (tables/columns/defaults, serials) + per-table INSERT shells —
+  **not** a raw concatenation (pg_dump is not installed on the host; replay must
+  be possible in pure SQL). `dumpTableData` serializes `json`/`jsonb` columns
+  through `JSON.stringify` (canonical JSON, not a JS string). `verify` = size +
+  sha256 checksum + full SQL-syntax replay into a temp table set (rollback, no
+  data change). `restore` = **full replace**: per-table `TRUNCATE ... RESTART
+  IDENTITY CASCADE`, COPY rows replayed in FK-dependency order (Kahn
+  topological sort of the `pg_constraint` graph), serial sequences reseeded
+  after (`GREATEST(MAX(id),1)` — `setval(...,0)` is rejected when a sequence
+  never ran), restore marked `status='restored'`; the ledger note is appended
+  `restored_at=<now>` (TEXT concat). Dumps land in `BACKUP_DIR`. Audited
+  `control.backup.*`.
+  - Replay correctness (found while wiring the restore test):
+    `parseCopyValue` was doubling backslashes (`out += "\\" + next`) so jsonb
+    values with `\"` nested escapes did not round-trip; `pg_get_serial_sequence`
+    raises (and aborts the whole transaction, catch does not help) on tables
+    **without** an `id` column (e.g. `shop_listings` keyed by `item_id`) — now a
+    single safe pg_class/pg_attribute query. Error context preserved: `table X
+    row N: …` / `TRUNCATE X: …` wrappers on replay failures.
+- `backend/src/modules/control/monitoring.ts` (NEW) — `/control/monitoring`:
+  system load/mem/disk, db+redis latency, online players, 1h error rate
+  (audit failures + 500s from `audit_log`), open security events + economy
+  anomalies (latest `economy_anomaly` events). No new DB surface.
+- `backend/src/modules/control/index.ts` — mounts resources/backups/wipe/
+  monitoring routers; wipe requires no actor; all behind the same key-auth.
+- `backend/src/modules/control/common.ts` (NEW) — `ControlError` +
+  `asyncHandler` shared by the new routers.
+- `backend/src/config/index.ts` — `BACKUP_DIR` (default `../ops/backups`,
+  `path.resolve` from backend cwd), `WIPE_PASSPHRASE` (optional second factor).
+  `backend/.env.example` + `ops/.env.prod.example` document both; prod example
+  requires `BACKUP_DIR` to be a host-mounted volume.
+- `tools/control-cli.mjs` (NEW) — zero-dependency Node CLI (fetch only, no npm
+  packages, never touches the DB): env `CTL_BASE_URL` (default
+  http://127.0.0.1:4000), `CTL_API_KEY` (required, exit 1 if missing),
+  `CTL_ACTOR` (optional audit attribution). Subcommands: `ping`, `status`,
+  `health`, `players`, `audit`, `security`, `monitoring`, `resources`
+  (list/show/register/update/unregister/enable/disable/version + verbs
+  install|update|restart|status), `backups` (list/create/show/verify/restore),
+  `wipe` (dry-run/confirm). Exit 0 on a business answer, 1 on network/usage.
+- `backend/src/test/integration.test.ts` — blocks 31 (control resources:
+  CRUD, probe, verbs, RBAC-agnostic key-auth, audit), 32 (control backup:
+  create + verify + `restored` restore), 33 (control wipe: dry-run token,
+  schema wipe re-migrates + ledger survives, confirm requires token + records
+  CRITICAL event, auto-backup default). Test env sets `BACKUP_DIR` to a fresh
+  temp dir + raises the control rate limit.
+
+### Why
+Roadmap #4/#5/#6/#7: the Control API surface (#12) existed but had no
+*write* operations; resources/backup/wipe are the operational half that makes
+the EXE meaningful. Backups/restore make wipe safe (auto-backup + full-replace
+restore satisfies the Do-Not-Change "backup/rollback requirements" without a
+host psql dependency). The CLI is the required thin EXE-style client — pure
+HTTP, no business logic, no DB access.
+
+### Dependencies / Impact
+- Migrations 030/031 apply on next `npm run migrate` / test bootstrap.
+- Config: `CONTROL_API_KEY` still REQUIRED (Round 12). `BACKUP_DIR` optional
+  (defaulted) but prod MUST point at a host-mounted volume — dumps are written
+  by the backend process and would be lost on a compose down otherwise.
+- Restore is destructive by contract (full replace), gated behind the API key;
+  wipe additionally has the token + optional passphrase + CRITICAL event.
+
+### Tests
+- [PASS] `npm run build` — clean.
+- [PASS] `npm test` — **33/33** pass, 0 fail (was 30). Blocks 31–33 cover
+  resources CRUD/probe/verbs, backup create/verify/restore, wipe dry-run/schema
+  wipe/confirm-gating.
+- [PASS] CLI smoke against a live backend (docker stack, seed `CONTROL_API_KEY`):
+  `ping`, `status`, `health`, `monitoring`, `players`, `audit`, `security`,
+  `resources register/list/version/unregister`, `backups list/create/verify`,
+  `wipe dry-run` all exit 0 with sensible output; wrong/absent key → 401 +
+  `control_invalid_key`.
+- Restore fidelity regression: restoring the dump re-creates users exactly
+  (18), sequences reseeded, jsonb column round-trips (escaped `\"` values
+  intact), `shop_listings` (no `id` column) restores without aborting.
+
+### Security
+- All control routes stay behind the constant-time `CONTROL_API_KEY` + the
+  control limiter. Every mutation (`control.resource.*`, `control.backup.*`,
+  `control.wipe.*`) is audited; wipe-confirm emits a CRITICAL event. Command
+  verbs run the **operator-registered** command from `resources.commands` and
+  refuse to target the backend's own postgres/redis service names. Restore is
+  destructive but explicit (single step, audited) and relies on the dump being
+  trusted (it came from the same API key). No passphrase stored in clear DB
+  columns; `WIPE_PASSPHRASE` compared constant-time.
+
+### Known Issues
+- Single API key = full control (incl. wipe + restore). Per-key RBAC is still
+  future work; `WIPE_PASSPHRASE` + the Short token are the mitigating second
+  factors. Prod operators should set `WIPE_PASSPHRASE`.
+- `restore` re-plays only data + serials; table ownership/permissions come from
+  migrations, so a restore always has a fresh (migrated) schema — that is the
+  contract (dump = tables + data; constraints/Indexes/RLS = migrations).
+- `docker inspect`/`tasklist` probes only work on the host the backend runs on;
+  noting as a scope limit, not a bug.
+- CLI defaults `CTL_BASE_URL` to 127.0.0.1:4000 (matches dev); production
+  clients set it explicitly.
+
+### Next Steps
+- Live control pass on the box: set `CONTROL_API_KEY` + `BACKUP_DIR` in prod,
+  create a real backup, restore it once, then exercise wipe dry-run (not
+  confirm) to see counts.
+- Consider per-key RBAC / scoped keys for the control API next.
+
+### Handoff Notes
+- See `AI_HANDOFF.md` Round 13 for full b/w details + the replay bugs the
+  restore test caught (backslash doubling, no-id serial lookup abort, setval
+  bounds).
+
+---
+
 ## [2026-09-10 12:35] — AI: big-pickle (opencode) — Admin Control API (`/control`)
 
 ### Task
