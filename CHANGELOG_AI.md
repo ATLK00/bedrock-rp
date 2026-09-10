@@ -48,8 +48,44 @@
 
 ### Handoff Notes
 ...
+---
+
+## [2026-09-10 15:45] — AI: big-pickle (opencode) — Fix: psql restore path missing TRUNCATE (CI #34453865682 red)
+
+### Task
+Restore backup after wipe returned 500 on CI (run 34453865682, commit `a8cd998`). Root cause: the `psql` code path in `applyDump` streamed the raw dump without truncating the post-wipe tables first, causing PK collisions on COPY.
+
+### Changed
+- `backend/src/modules/control/backupManager.ts`:
+  - `applyDump` psql branch now wraps the dump in `BEGIN; TRUNCATE ... RESTART IDENTITY CASCADE; <dump> COMMIT;` so all public tables (topologically sorted, excluding `_migrations`) are emptied before COPY replay — matching the in-process `replayDump` replace semantics.
+  - Extracted `rebaseSequences(tables)` helper (sync serial sequences via `setval`) shared by both psql and in-process paths; the psql branch calls it after psql succeeds.
+  - `replayDump` tail refactored to call the same `rebaseSequences` helper instead of inline query.
+
+### Why
+CI runners (`ubuntu-latest`) have `psql` installed → `applyDump` picks the psql branch over `replayDump`. Post-wipe, `runMigrations` re-seeds rows (items, permissions, roles, etc.); the dump also contains those same rows. Without TRUNCATE, COPY hits duplicate PK violations → psql exits non-zero with `ON_ERROR_STOP=1` → `ControlError(500)`. The in-process path always worked because it TRUNCATEs each table before its COPY block.
+
+### Dependencies / Impact
+No new dependencies. Bug fix only.
+
+### Tests
+- [PASS] 33/33 on Linux node 22 + psql 15 present (exact CI env) via `docker exec ci-node`
+- [PASS] 33/33 on Linux node 22 without psql (replayDump path)
+- [PASS] 33/33 on Windows node 24 (baseline, no psql)
+
+### Security
+No change.
+
+### Known Issues
+None.
+
+### Next Steps
+Commit fix, push, verify CI green.
+
+### Handoff Notes
+CI failure on `a8cd998` was the first time psql was exercised by the backup-restore code in a real environment. Previous smoke tests on Windows had no `psql` → always hit `replayDump`.
 
 ---
+
 ## [2026-09-10 15:10] — AI: big-pickle (opencode) — Resource Manager + Backup/Wipe/Restore + Monitoring + Control CLI (33/33)
 
 ### Task

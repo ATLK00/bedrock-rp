@@ -381,6 +381,16 @@ async function applyDump(content: string, backupId: number, actorUserId: number 
     psql.once("exit", (code) => resolve(code === 0));
   });
   if (psqlAvailable) {
+    // Replace semantics (a restore is a full rollback to the snapshot, not an
+    // append) must match the in-process replay: drop current contents first so
+    // migration seeds / rows written since the dump was taken never collide on
+    // PK. `_migrations` is excluded so the migration ledger survives the wipe.
+    const tables = await listTables();
+    const script =
+      `BEGIN;\n` +
+      `TRUNCATE ${tables.map(quoteIdent).join(", ")} RESTART IDENTITY CASCADE;\n` +
+      content +
+      `\nCOMMIT;\n`;
     const out = await new Promise<{ code: number | null; stderr: string }>((resolve) => {
       const child = spawn("psql", ["-v", "ON_ERROR_STOP=1", config.DATABASE_URL, "-f", "-"], {
         stdio: ["pipe", "ignore", "pipe"],
@@ -389,15 +399,42 @@ async function applyDump(content: string, backupId: number, actorUserId: number 
       child.stderr.on("data", (d) => (stderr += d));
       child.on("error", (e) => resolve({ code: -1, stderr: String(e) }));
       child.on("close", (code) => resolve({ code, stderr }));
-      child.stdin.write(content);
+      child.stdin.write(script);
       child.stdin.end();
     });
     if (out.code !== 0) {
       throw new ControlError(500, `psql restore failed: ${out.stderr.slice(0, 2000)}`);
     }
+    // Restored rows carry explicit ids; COPY doesn't advance serial sequences,
+    // so bring every sequence forward just like replayDump does.
+    await rebaseSequences(tables);
     return;
   }
   await replayDump(content, backupId, actorUserId, requestId);
+}
+
+/** Re-sync serial sequences to the maximum restored `id` per table. Only
+ * tables that actually have an `id` column are considered (calling
+ * pg_get_serial_sequence on an id-less table raises and would abort). */
+async function rebaseSequences(tables: string[]) {
+  const seqRes = await pool.query(
+    `SELECT c.relname AS t,
+            pg_get_serial_sequence(c.oid::regclass::text, 'id') AS seq
+     FROM pg_class c
+     JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = 'public'
+     WHERE c.relkind = 'r'
+       AND EXISTS (
+         SELECT 1 FROM pg_attribute a
+         WHERE a.attrelid = c.oid AND a.attnum > 0 AND a.attname = 'id'
+       )`
+  );
+  const seqByTable = new Map(seqRes.rows.map((r: any) => [r.t as string, r.seq as string]));
+  for (const t of tables) {
+    const seq = seqByTable.get(t);
+    if (seq) {
+      await pool.query(`SELECT setval($1, GREATEST(COALESCE((SELECT MAX(id) FROM ${quoteIdent(t)}), 0), 1))`, [seq]);
+    }
+  }
 }
 
 async function replayDump(content: string, backupId: number, actorUserId: number | null, requestId: string | null) {
@@ -473,27 +510,8 @@ if (cols.length === 0) continue;
       }
     }
     // Restored rows carry explicit ids; bring every serial sequence forward so
-    // the next plain insert can't collide with restored ids. Only tables that
-    // actually have an `id` column are considered (calling pg_get_serial_sequence
-    // on an id-less table raises and would abort the whole transaction).
-    const seqRes = await client.query(
-      `SELECT c.relname AS t,
-              pg_get_serial_sequence(c.oid::regclass::text, 'id') AS seq
-       FROM pg_class c
-       JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = 'public'
-       WHERE c.relkind = 'r'
-         AND EXISTS (
-           SELECT 1 FROM pg_attribute a
-           WHERE a.attrelid = c.oid AND a.attnum > 0 AND a.attname = 'id'
-         )`
-    );
-    const seqByTable = new Map(seqRes.rows.map((r: any) => [r.t as string, r.seq as string]));
-    for (const t of touchedTables) {
-      const seq = seqByTable.get(t);
-      if (seq) {
-        await client.query(`SELECT setval($1, GREATEST(COALESCE((SELECT MAX(id) FROM ${quoteIdent(t)}), 0), 1))`, [seq]);
-      }
-    }
+    // the next plain insert can't collide with restored ids.
+    await rebaseSequences(touchedTables);
     await client.query("COMMIT");
   } catch (err) {
     await client.query("ROLLBACK").catch(() => {});
